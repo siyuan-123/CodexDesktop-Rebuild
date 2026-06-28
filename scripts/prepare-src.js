@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Pre-build: Repack patched ASAR, replace codex CLI, assemble for forge.
+ * Pre-build: Repack patched ASAR, align platform resources, assemble for forge.
  *
  * Flow:
  *   1. Repack _asar/ -> app.asar (with patches applied)
- *   2. Replace codex binary with @cometix/codex version
+ *   2. Replace codex binary with @cometix/codex version where needed
  *   3. Copy everything to src/ for forge (app.asar + unpacked + resources)
  *
+ * For Windows: keep upstream codex.exe so app-server and cua_node/node_repl
+ * MCP metadata stay protocol-compatible.
  * For Linux: strip macOS-only resources, add Linux codex from @cometix/codex
  *
  * Usage:
@@ -163,15 +165,26 @@ function main() {
   // 1. Repack _asar/ -> app.asar
   const repackedAsar = path.join(sourceDir, "app.asar");
   console.log("   [repack] _asar/ -> app.asar");
-  execSync(`npx asar pack "${asarContentDir}" "${repackedAsar}"`);
+  const asarPackArgs = isLinux
+    ? ""
+    : platform === "win"
+      ? ` --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}"`
+      : ` --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty}" --unpack "{**/*.node,**/node-pty/build/Release/*.exe}"`;
+  execSync(`npx asar pack "${asarContentDir}" "${repackedAsar}"${asarPackArgs}`);
   const asarSize = (fs.statSync(repackedAsar).size / 1048576).toFixed(1);
   console.log(`   [ok] app.asar: ${asarSize} MB`);
 
-  // 2. Replace codex binary with @cometix/codex
+  // 2. Replace codex binary with @cometix/codex where needed.
+  // Windows must keep the upstream codex.exe from the MSIX. The Desktop
+  // app-server and bundled cua_node/node_repl exchange Codex-specific MCP
+  // metadata; mixing a different @cometix/codex build can break browser tools
+  // with errors such as "sandboxCwd must use the file URI scheme".
   const isWin = platform === "win";
   const codexBinName = isWin ? "codex.exe" : "codex";
-  const vendorCodex = resolveCodexVendor(platform);
-  if (vendorCodex) {
+  const vendorCodex = isWin ? null : resolveCodexVendor(platform);
+  if (isWin) {
+    console.log(`   [codex] keeping upstream ${codexBinName}`);
+  } else if (vendorCodex) {
     // For Linux: put codex in sourceDir (mac-x64/) so it can be found,
     // but also mark for later copy to forge output.
     const dest = path.join(sourceDir, codexBinName);

@@ -3,7 +3,9 @@
  * build-from-upstream.js — Patch upstream Codex and repackage
  *
  * For macOS and Windows: no forge needed.
- * Takes the upstream app, patches ASAR in-place, replaces codex CLI, outputs distributable.
+ * Takes the upstream app, patches ASAR in-place, and outputs a distributable.
+ * Windows keeps the upstream codex.exe so the app-server protocol stays aligned
+ * with the bundled cua_node/node_repl binaries from the same MSIX.
  *
  * Usage:
  *   node scripts/build-from-upstream.js --platform mac-arm64
@@ -12,7 +14,7 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -47,6 +49,13 @@ function copyRecursive(src, dest) {
     }
   }
   return count;
+}
+
+function clearExistingAsarUnpacked(asarPath) {
+  const unpackedPath = `${asarPath}.unpacked`;
+  if (fs.existsSync(unpackedPath)) {
+    fs.rmSync(unpackedPath, { recursive: true, force: true });
+  }
 }
 
 function resolveCodexVendor(platform) {
@@ -148,7 +157,8 @@ function buildMac(platform) {
   // 3. Repack patched ASAR
   const asarPath = path.join(resourcesDir, "app.asar");
   console.log("   [asar pack] _asar/ -> app.asar");
-  execSync(`npx asar pack "${asarDir}" "${asarPath}"`);
+  clearExistingAsarUnpacked(asarPath);
+  execSync(`npx asar pack "${asarDir}" "${asarPath}" --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty}" --unpack "{**/*.node,**/node-pty/build/Release/*.exe}"`);
 
   // 4. Update ASAR integrity hash in Info.plist
   const infoPlist = path.join(outApp, "Contents", "Info.plist");
@@ -220,7 +230,8 @@ function buildWin(platform) {
 
   // Repack patched ASAR
   console.log("   [asar pack] _asar/ -> app.asar");
-  execSync(`npx asar pack "${asarDir}" "${asarPath}"`);
+  clearExistingAsarUnpacked(asarPath);
+  execSync(`npx asar pack "${asarDir}" "${asarPath}" --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}"`);
 
   // Compute new hash and patch exe
   const newHash = computeAsarHeaderHash(asarPath);
@@ -236,15 +247,18 @@ function buildWin(platform) {
     }
   }
 
-  // Replace codex CLI
-  replaceCodex(platform, resourcesDir, "codex.exe");
+  // Keep the upstream Windows codex.exe.  The Desktop app-server and
+  // cua_node/node_repl exchange Codex-specific MCP metadata; replacing only the
+  // CLI with @cometix/codex can make that protocol drift and break browser
+  // tools (for example: sandboxCwd must use the file URI scheme).
+  keepUpstreamCodex(platform, resourcesDir, "codex.exe");
 
   // Create ZIP
   const version = getVersion(asarDir);
   const zipName = `Codex-win-x64-${version}.zip`;
   const zipPath = path.join(OUT_DIR, zipName);
   console.log(`   [zip] ${zipName}`);
-  execSync(`7zz a -tzip -mx=5 "${zipPath}" .`, { cwd: outApp });
+  createZip(zipPath, outApp);
 
   const sizeMB = (fs.statSync(zipPath).size / 1048576).toFixed(1);
   console.log(`   [ok] ${zipPath} (${sizeMB} MB)`);
@@ -299,6 +313,40 @@ function replaceCodex(platform, resourcesDir, binName) {
   } else {
     console.log(`   [!] @cometix/codex not found, keeping upstream codex`);
   }
+}
+
+function keepUpstreamCodex(platform, resourcesDir, binName) {
+  const codexPath = path.join(resourcesDir, binName);
+  if (!fs.existsSync(codexPath)) {
+    console.log(`   [!] upstream ${binName} not found for ${platform}`);
+    return;
+  }
+  console.log(`   [codex] keeping upstream ${binName}`);
+}
+
+function createZip(zipPath, cwd) {
+  try {
+    execSync(`7zz a -tzip -mx=5 "${zipPath}" .`, { cwd, stdio: "pipe" });
+    return;
+  } catch {}
+
+  if (process.platform === "win32") {
+    execFileSync("powershell", [
+      "-NoProfile",
+      "-ExecutionPolicy", "Bypass",
+      "-Command",
+      "& { param($src, $zip) " +
+        "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+        "if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; " +
+        "[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $zip, " +
+        "[System.IO.Compression.CompressionLevel]::Optimal, $false) }",
+      cwd,
+      zipPath,
+    ], { stdio: "pipe" });
+    return;
+  }
+
+  execSync(`zip -r "${zipPath}" .`, { cwd, stdio: "pipe" });
 }
 
 function getVersion(asarDir) {
