@@ -58,6 +58,16 @@ function clearExistingAsarUnpacked(asarPath) {
   }
 }
 
+function asarCliPath() {
+  return path.join(PROJECT_ROOT, "node_modules", "@electron", "asar", "bin", "asar.mjs");
+}
+
+function packAsar(asarDir, asarPath, extraArgs = []) {
+  execFileSync(process.execPath, [asarCliPath(), "pack", asarDir, asarPath, ...extraArgs], {
+    stdio: "pipe",
+  });
+}
+
 function resolveCodexVendor(platform) {
   const triple = TARGET_TRIPLE_MAP[platform];
   if (!triple) return null;
@@ -158,7 +168,10 @@ function buildMac(platform) {
   const asarPath = path.join(resourcesDir, "app.asar");
   console.log("   [asar pack] _asar/ -> app.asar");
   clearExistingAsarUnpacked(asarPath);
-  execSync(`npx asar pack "${asarDir}" "${asarPath}" --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty}" --unpack "{**/*.node,**/node-pty/build/Release/*.exe}"`);
+  packAsar(asarDir, asarPath, [
+    "--unpack-dir", "{node_modules/better-sqlite3,node_modules/node-pty}",
+    "--unpack", "{**/*.node,**/node-pty/build/Release/*.exe}",
+  ]);
 
   // 4. Update ASAR integrity hash in Info.plist
   const infoPlist = path.join(outApp, "Contents", "Info.plist");
@@ -231,7 +244,9 @@ function buildWin(platform) {
   // Repack patched ASAR
   console.log("   [asar pack] _asar/ -> app.asar");
   clearExistingAsarUnpacked(asarPath);
-  execSync(`npx asar pack "${asarDir}" "${asarPath}" --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}"`);
+  packAsar(asarDir, asarPath, [
+    "--unpack-dir", "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}",
+  ]);
 
   // Compute new hash and patch exe
   const newHash = computeAsarHeaderHash(asarPath);
@@ -325,28 +340,39 @@ function keepUpstreamCodex(platform, resourcesDir, binName) {
 }
 
 function createZip(zipPath, cwd) {
+  let sevenZipError = null;
   try {
-    execSync(`7zz a -tzip -mx=5 "${zipPath}" .`, { cwd, stdio: "pipe" });
+    execFileSync("7zz", ["a", "-tzip", "-mx=5", zipPath, "."], { cwd, stdio: "pipe" });
     return;
-  } catch {}
-
-  if (process.platform === "win32") {
-    execFileSync("powershell", [
-      "-NoProfile",
-      "-ExecutionPolicy", "Bypass",
-      "-Command",
-      "& { param($src, $zip) " +
-        "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
-        "if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; " +
-        "[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $zip, " +
-        "[System.IO.Compression.CompressionLevel]::Optimal, $false) }",
-      cwd,
-      zipPath,
-    ], { stdio: "pipe" });
-    return;
+  } catch (e) {
+    sevenZipError = e;
   }
 
-  execSync(`zip -r "${zipPath}" .`, { cwd, stdio: "pipe" });
+  if (process.platform === "win32") {
+    try {
+      execFileSync("powershell", [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        "& { param($src, $zip) " +
+          "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+          "if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }; " +
+          "[System.IO.Compression.ZipFile]::CreateFromDirectory($src, $zip, " +
+          "[System.IO.Compression.CompressionLevel]::Optimal, $false) }",
+        cwd,
+        zipPath,
+      ], { stdio: "pipe" });
+      return;
+    } catch (e) {
+      throw new Error(`Failed to create ZIP with 7zz or PowerShell: 7zz: ${sevenZipError.message}; PowerShell: ${e.message}`);
+    }
+  }
+
+  try {
+    execFileSync("zip", ["-r", zipPath, "."], { cwd, stdio: "pipe" });
+  } catch (e) {
+    throw new Error(`Failed to create ZIP with 7zz or zip: 7zz: ${sevenZipError.message}; zip: ${e.message}`);
+  }
 }
 
 function getVersion(asarDir) {

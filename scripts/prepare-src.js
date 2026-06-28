@@ -17,7 +17,7 @@
  */
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 
 const SRC = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
@@ -37,6 +37,16 @@ const MACOS_STRIP = new Set([
   "codexTemplate.png", "codexTemplate@2x.png",
 ]);
 const MACOS_STRIP_DIRS = new Set(["native"]);
+
+function asarCliPath() {
+  return path.join(PROJECT_ROOT, "node_modules", "@electron", "asar", "bin", "asar.mjs");
+}
+
+function packAsar(asarDir, asarPath, extraArgs = []) {
+  execFileSync(process.execPath, [asarCliPath(), "pack", asarDir, asarPath, ...extraArgs], {
+    stdio: "pipe",
+  });
+}
 
 function copyRecursive(src, dest, skipFiles, skipDirs) {
   fs.mkdirSync(dest, { recursive: true });
@@ -166,11 +176,14 @@ function main() {
   const repackedAsar = path.join(sourceDir, "app.asar");
   console.log("   [repack] _asar/ -> app.asar");
   const asarPackArgs = isLinux
-    ? ""
+    ? []
     : platform === "win"
-      ? ` --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}"`
-      : ` --unpack-dir "{node_modules/better-sqlite3,node_modules/node-pty}" --unpack "{**/*.node,**/node-pty/build/Release/*.exe}"`;
-  execSync(`npx asar pack "${asarContentDir}" "${repackedAsar}"${asarPackArgs}`);
+      ? ["--unpack-dir", "{node_modules/better-sqlite3,node_modules/node-pty,node_modules/@worklouder}"]
+      : [
+          "--unpack-dir", "{node_modules/better-sqlite3,node_modules/node-pty}",
+          "--unpack", "{**/*.node,**/node-pty/build/Release/*.exe}",
+        ];
+  packAsar(asarContentDir, repackedAsar, asarPackArgs);
   const asarSize = (fs.statSync(repackedAsar).size / 1048576).toFixed(1);
   console.log(`   [ok] app.asar: ${asarSize} MB`);
 

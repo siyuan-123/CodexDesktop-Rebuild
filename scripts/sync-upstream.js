@@ -165,7 +165,7 @@ function countFiles(dir) {
 function encodeScopedPackagePath(relPath) {
   return relPath
     .split(/[\\/]+/)
-    .map((part) => part.replace(/@/g, "%40"))
+    .map((part) => part.startsWith("@") ? `%40${part.slice(1)}` : part)
     .join(path.sep);
 }
 
