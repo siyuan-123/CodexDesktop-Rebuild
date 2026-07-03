@@ -6,7 +6,7 @@
  *   src/{platform}/
  *     _asar/              Extracted app.asar content (patch target)
  *     app.asar.unpacked/  Native modules (kept as-is from upstream)
- *     codex|codex.exe     CLI binary (will be replaced by @cometix/codex)
+ *     codex|codex.exe     CLI binary (Windows keeps upstream; Linux uses @cometix/codex later)
  *     rg|rg.exe           ripgrep binary (kept from upstream)
  *     plugins/            Bundled plugins
  *     native/             Platform native modules
@@ -21,7 +21,7 @@ const tls = require("tls");
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
-const { execSync } = require("child_process");
+const { execSync, execFileSync } = require("child_process");
 
 // TLS certs for MS delivery CDN
 const certsDir = path.join(__dirname, "certs");
@@ -71,17 +71,55 @@ function extractArchive(archive, dest) {
     // ditto preserves macOS symlinks + resource forks (required for .app)
     execSync(`ditto -xk "${archive}" "${dest}"`);
   } else {
-    // 7zz for Windows MSIX and Linux (symlinks don't matter — only ASAR content used)
-    for (const bin of ["7zz", "7z"]) {
+    // 7zz for Windows MSIX and Linux (symlinks don't matter — only ASAR content used).
+    // 本地 Windows 环境不一定预装 7-Zip；bsdtar 通常随 Windows 提供，可解压 zip/msix。
+    for (const bin of ["7zz", "7z", "tar"]) {
       try {
-        execSync(`${bin} x -y -o"${dest}" "${archive}"`, { stdio: "pipe" });
+        const cmd = bin === "tar"
+          ? `${bin} -xf "${archive}" -C "${dest}"`
+          : `${bin} x -y -o"${dest}" "${archive}"`;
+        execSync(cmd, { stdio: "pipe" });
+        decodePercentNames(dest);
         return;
-      } catch {
-        if (fs.readdirSync(dest).length > 0) return;
-      }
+      } catch {}
+    }
+
+    if (process.platform === "win32") {
+      try {
+        execFileSync("powershell", [
+          "-NoProfile",
+          "-ExecutionPolicy", "Bypass",
+          "-Command",
+          "& { param($archive, $dest) " +
+            "Add-Type -AssemblyName System.IO.Compression.FileSystem; " +
+            "[System.IO.Compression.ZipFile]::ExtractToDirectory($archive, $dest) }",
+          archive,
+          dest,
+        ], { stdio: "pipe" });
+        decodePercentNames(dest);
+        return;
+      } catch {}
     }
     throw new Error(`Failed to extract ${archive}`);
   }
+}
+
+function decodePercentNames(root) {
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const current = path.join(dir, e.name);
+      if (e.isDirectory()) walk(current);
+
+      if (!/%[0-9a-fA-F]{2}/.test(e.name)) continue;
+      let decoded;
+      try { decoded = decodeURIComponent(e.name); } catch { continue; }
+      if (!decoded || decoded === e.name || /[\\/:*?"<>|\0]/.test(decoded)) continue;
+
+      const target = path.join(dir, decoded);
+      if (!fs.existsSync(target)) fs.renameSync(current, target);
+    }
+  };
+  walk(root);
 }
 
 function findFile(dir, name) {
@@ -93,7 +131,32 @@ function findFile(dir, name) {
   return null;
 }
 
+function findExistingPathCaseInsensitive(p) {
+  if (fs.existsSync(p)) return p;
+
+  const parsed = path.parse(p);
+  let current = parsed.root;
+  const rest = path.relative(parsed.root, p);
+  if (!rest || rest.startsWith("..")) return p;
+
+  for (const part of rest.split(/[\\/]+/)) {
+    if (!part) continue;
+    let entries;
+    try {
+      entries = fs.readdirSync(current);
+    } catch {
+      return p;
+    }
+    const match = entries.find((entry) => entry.toLowerCase() === part.toLowerCase());
+    if (!match) return p;
+    current = path.join(current, match);
+  }
+
+  return fs.existsSync(current) ? current : p;
+}
+
 function copyRecursive(src, dest) {
+  src = findExistingPathCaseInsensitive(src);
   fs.mkdirSync(dest, { recursive: true });
   let count = 0;
   for (const e of fs.readdirSync(src, { withFileTypes: true })) {
@@ -117,6 +180,108 @@ function countFiles(dir) {
     else n++;
   }
   return n;
+}
+
+function encodeScopedPackagePath(relPath) {
+  return relPath
+    .split(/[\\/]+/)
+    .map((part) => part.startsWith("@") ? `%40${part.slice(1)}` : part)
+    .join(path.sep);
+}
+
+function resolveUnpackedFile(unpackedRoot, relPath) {
+  const direct = path.join(unpackedRoot, relPath);
+  if (fs.existsSync(direct)) return direct;
+
+  const directCase = findExistingPathCaseInsensitive(direct);
+  if (fs.existsSync(directCase)) return directCase;
+
+  // Windows Store MSIX extraction can percent-encode scoped package folders:
+  //   @worklouder -> %40worklouder
+  //   @serialport -> %40serialport
+  const encoded = path.join(unpackedRoot, encodeScopedPackagePath(relPath));
+  if (fs.existsSync(encoded)) return encoded;
+
+  const encodedCase = findExistingPathCaseInsensitive(encoded);
+  return fs.existsSync(encodedCase) ? encodedCase : null;
+}
+
+function assertInside(baseDir, targetPath, label) {
+  const rel = path.relative(baseDir, targetPath);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`${label} escapes output: ${targetPath}`);
+  }
+}
+
+function extractAsarForPatching(asarPath, asarDest) {
+  const asar = require("@electron/asar");
+  const { header, headerSize } = asar.getRawHeader(asarPath);
+  const fd = fs.openSync(asarPath, "r");
+  const unpackedRoot = `${asarPath}.unpacked`;
+  let packedCount = 0;
+  let unpackedCount = 0;
+  const missingUnpacked = [];
+
+  // ASAR layout: 8-byte pickle header + header JSON + packed file payload.
+  const dataStart = 8 + headerSize;
+
+  try {
+    const visit = (node, relPath) => {
+      const dest = path.join(asarDest, relPath);
+      assertInside(asarDest, dest, `ASAR entry ${relPath}`);
+
+      if (node.files) {
+        fs.mkdirSync(dest, { recursive: true });
+        for (const [name, child] of Object.entries(node.files)) {
+          visit(child, path.join(relPath, name));
+        }
+        return;
+      }
+
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+
+      if (node.link) {
+        const linkTarget = path.join(asarDest, node.link);
+        assertInside(asarDest, linkTarget, `ASAR link ${relPath}`);
+        try { fs.unlinkSync(dest); } catch {}
+        fs.symlinkSync(path.relative(path.dirname(dest), linkTarget), dest);
+        return;
+      }
+
+      const size = Number(node.size || 0);
+      if (node.unpacked) {
+        const unpackedFile = resolveUnpackedFile(unpackedRoot, relPath);
+        if (!unpackedFile) {
+          missingUnpacked.push(relPath);
+          return;
+        }
+        fs.copyFileSync(unpackedFile, dest);
+        unpackedCount++;
+      } else if (size <= 0) {
+        fs.writeFileSync(dest, Buffer.alloc(0));
+        packedCount++;
+      } else {
+        const buf = Buffer.alloc(size);
+        fs.readSync(fd, buf, 0, size, dataStart + Number(node.offset || 0));
+        fs.writeFileSync(dest, buf);
+        packedCount++;
+      }
+
+      if (node.executable) {
+        try { fs.chmodSync(dest, 0o755); } catch {}
+      }
+    };
+
+    visit({ files: header.files }, "");
+  } finally {
+    fs.closeSync(fd);
+  }
+
+  console.log(`   [asar extract] ${packedCount} packed files, ${unpackedCount} unpacked files`);
+  if (missingUnpacked.length > 0) {
+    const sample = missingUnpacked.slice(0, 5).join(", ");
+    throw new Error(`Missing ${missingUnpacked.length} unpacked ASAR file(s); refusing to build crash-prone stubs. First: ${sample}`);
+  }
 }
 
 // ─── Version detection ──────────────────────────────────────────
@@ -223,7 +388,7 @@ function assembleOutput(resourcesDir, destDir, label) {
   // 1. Extract app.asar → _asar/ (for patching)
   const asarDest = path.join(destDir, "_asar");
   console.log("   [asar extract] -> _asar/");
-  execSync(`npx asar extract "${asarPath}" "${asarDest}"`);
+  extractAsarForPatching(asarPath, asarDest);
 
   // 2. Copy app.asar.unpacked/ as-is (native modules)
   const unpackedSrc = path.join(resourcesDir, "app.asar.unpacked");
