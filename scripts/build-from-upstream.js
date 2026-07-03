@@ -18,7 +18,10 @@ const { execSync, execFileSync } = require("child_process");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
-const OUT_DIR = path.join(PROJECT_ROOT, "out");
+// CODEX_OUT_DIR 用于输出目录被其他进程锁定时（如 IDE 缓存 asar 句柄）换新目录构建
+const OUT_DIR = process.env.CODEX_OUT_DIR
+  ? path.resolve(PROJECT_ROOT, process.env.CODEX_OUT_DIR)
+  : path.join(PROJECT_ROOT, "out");
 
 const TARGET_TRIPLE_MAP = {
   "mac-arm64": "aarch64-apple-darwin",
