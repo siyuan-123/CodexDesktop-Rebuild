@@ -23,6 +23,9 @@ const PATCHES = [
   "patch-archive-delete.js",
   "patch-crash-forensics.js",
   "patch-worker-forensics.js",
+  "patch-worker-limits.js",
+  "patch-diff-limits.js",
+  "patch-git-output-cap.js",
   "patch-sentry-scope.js",
   "patch-cdp-screenshot.js",
 ];
