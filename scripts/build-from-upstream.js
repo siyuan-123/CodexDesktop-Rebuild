@@ -54,6 +54,42 @@ function copyRecursive(src, dest) {
   return count;
 }
 
+function findPath(dir, predicate) {
+  for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, e.name);
+    if (predicate(e, full)) return full;
+    if (e.isDirectory()) {
+      const found = findPath(full, predicate);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+function findAppAncestor(startPath, boundaryDir) {
+  const boundary = path.resolve(boundaryDir);
+  let current = path.resolve(startPath);
+  while (current.startsWith(boundary)) {
+    if (path.basename(current).toLowerCase().endsWith(".app")) return current;
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+}
+
+function findMacAppBundle(extractDir) {
+  // 上游安装包偶尔会调整 bundle 名称，不能只匹配 Codex.app。
+  const codexApp = findPath(extractDir, (e) => e.isDirectory() && e.name === "Codex.app");
+  if (codexApp) return codexApp;
+
+  const anyApp = findPath(extractDir, (e) => e.isDirectory() && e.name.toLowerCase().endsWith(".app"));
+  if (anyApp) return anyApp;
+
+  const asarPath = findPath(extractDir, (e) => e.isFile() && e.name === "app.asar");
+  return asarPath ? findAppAncestor(path.dirname(asarPath), extractDir) : null;
+}
+
 function clearExistingAsarUnpacked(asarPath) {
   const unpackedPath = `${asarPath}.unpacked`;
   if (fs.existsSync(unpackedPath)) {
@@ -138,21 +174,13 @@ function buildMac(platform) {
   const variant = platform === "mac-arm64" ? "arm64" : "x64";
   const extractDir = path.join(tempDir, `${variant}-extract`);
 
-  // Find Codex.app
-  let appPath = null;
-  if (fs.existsSync(extractDir)) {
-    const findApp = (dir) => {
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (e.name === "Codex.app" && e.isDirectory()) return path.join(dir, e.name);
-        if (e.isDirectory()) { const r = findApp(path.join(dir, e.name)); if (r) return r; }
-      }
-      return null;
-    };
-    appPath = findApp(extractDir);
-  }
+  const appPath = fs.existsSync(extractDir) ? findMacAppBundle(extractDir) : null;
 
   if (!appPath) {
-    console.error(`[x] Codex.app not found in cache. Run sync-upstream first.`);
+    const asarPath = fs.existsSync(extractDir)
+      ? findPath(extractDir, (e) => e.isFile() && e.name === "app.asar")
+      : null;
+    console.error(`[x] macOS .app bundle not found in cache${asarPath ? ` (app.asar at ${asarPath})` : ""}. Run sync-upstream first.`);
     process.exit(1);
   }
 
