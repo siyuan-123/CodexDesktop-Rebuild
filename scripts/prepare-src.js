@@ -48,6 +48,43 @@ function packAsar(asarDir, asarPath, extraArgs = []) {
   });
 }
 
+function toPosixPath(p) {
+  return p.split(path.sep).join("/");
+}
+
+function normalizeMainPath(mainPath) {
+  return String(mainPath || "")
+    .replace(/\\/g, "/")
+    .replace(/^\.?\//, "")
+    .replace(/^src\//, "");
+}
+
+function resolveUpstreamMain(asarContentDir) {
+  const pkgPath = path.join(asarContentDir, "package.json");
+  let declaredMain = "";
+  try {
+    declaredMain = JSON.parse(fs.readFileSync(pkgPath, "utf-8")).main || "";
+  } catch {}
+
+  const candidates = [
+    normalizeMainPath(declaredMain),
+    ".vite/build/bootstrap.js",
+  ].filter(Boolean);
+
+  const buildDir = path.join(asarContentDir, ".vite", "build");
+  if (fs.existsSync(buildDir)) {
+    for (const name of ["main.js", ...fs.readdirSync(buildDir).filter((f) => /^main-.*\.js$/.test(f)).sort()]) {
+      candidates.push(`.vite/build/${name}`);
+    }
+  }
+
+  for (const rel of candidates) {
+    if (fs.existsSync(path.join(asarContentDir, rel))) return rel;
+  }
+
+  return normalizeMainPath(declaredMain) || ".vite/build/bootstrap.js";
+}
+
 function copyRecursive(src, dest, skipFiles, skipDirs) {
   fs.mkdirSync(dest, { recursive: true });
   let count = 0;
@@ -168,9 +205,12 @@ function main() {
     console.error(`[x] _asar/ not found in ${path.relative(PROJECT_ROOT, sourceDir)}/`);
     process.exit(1);
   }
+  const upstreamMain = resolveUpstreamMain(asarContentDir);
+  const packagedMain = `src/${upstreamMain}`;
 
   console.log(`-- prepare-src: ${platform}`);
   console.log(`   source: ${path.relative(PROJECT_ROOT, sourceDir)}/`);
+  console.log(`   main: ${packagedMain}`);
 
   // 1. Repack _asar/ -> app.asar
   const repackedAsar = path.join(sourceDir, "app.asar");
@@ -237,6 +277,12 @@ function main() {
     const skipDirs = new Set(["node_modules"]);
     const count = copyRecursive(asarContentDir, SRC, null, skipDirs);
     console.log(`   [linux] _asar/ -> src/ (${count} files, skipped node_modules/)`);
+
+    const copiedMain = path.join(SRC, upstreamMain);
+    if (!fs.existsSync(copiedMain)) {
+      console.error(`[x] Main entry not found after Linux assembly: ${toPosixPath(path.relative(PROJECT_ROOT, copiedMain))}`);
+      process.exit(1);
+    }
   }
 
   // 4. Sync version to root package.json
@@ -247,7 +293,7 @@ function main() {
     const rootPkg = JSON.parse(fs.readFileSync(rootPkgPath, "utf-8"));
     const oldVer = rootPkg.version;
     rootPkg.version = upstream.version || rootPkg.version;
-    rootPkg.main = "src/.vite/build/bootstrap.js";
+    rootPkg.main = packagedMain;
     for (const key of [
       "codexBuildNumber", "codexBuildFlavor",
       "codexSparkleFeedUrl", "codexSparklePublicKey",
@@ -263,9 +309,10 @@ function main() {
   // For mac/win: create stub main entry so forge validation passes.
   // The real code is in app.asar which we copy in packageAfterCopy.
   if (!isLinux) {
-    const stubDir = path.join(SRC, ".vite", "build");
+    const stubPath = path.join(SRC, upstreamMain);
+    const stubDir = path.dirname(stubPath);
     fs.mkdirSync(stubDir, { recursive: true });
-    fs.writeFileSync(path.join(stubDir, "bootstrap.js"), "// stub - real code in app.asar\n");
+    fs.writeFileSync(stubPath, "// stub - real code in app.asar\n");
     // Also need package.json in src/ for forge
     const asarPkg = path.join(asarContentDir, "package.json");
     if (fs.existsSync(asarPkg)) {
