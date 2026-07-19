@@ -85,6 +85,14 @@ gate 2307253562 → codex_git_commit
 | `patch-devtools.js` | `allowInspectElement` / `devTools` | 属性值 → `!0` |
 | `patch-copyright.js` | About Dialog / setAboutPanelOptions | 替换版权文本 |
 | `patch-process-polyfill.js` | Windows `process` polyfill | 注入 `process.env`/`process.platform` |
+| `patch-remote-control.js` | gate `4114442250` / `1042620455` | 开启 Connections 入口与 Remote Control 数据加载；保留服务端权限状态判断 |
+
+### Remote Control 已确认 gate
+
+| ID | 功能 | 影响范围 |
+|---|---|---|
+| `4114442250` | Remote Connections 可见性 | Settings 中的 Connections 项、相关远程标识 |
+| `1042620455` | Remote Control / Slingshot | 手机控制分区、远程设备加载、主进程 gate bridge |
 
 ## 备注
 

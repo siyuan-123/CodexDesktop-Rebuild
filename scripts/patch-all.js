@@ -20,6 +20,7 @@ const PATCHES = [
   "patch-codex-home-env.js",
   "patch-model-catalog-filter.js",
   "patch-plugin-auth.js",
+  "patch-remote-control.js",
   "patch-composer-workspace-root.js",
   "patch-updater.js",
   "patch-archive-delete.js",

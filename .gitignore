@@ -6,6 +6,7 @@ node_modules/
 
 # Build outputs
 out/
+out-*/
 dist/
 
 # Upstream ASAR extracts and build-time copies (all generated)
