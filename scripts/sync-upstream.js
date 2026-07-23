@@ -39,6 +39,8 @@ const VERSION_FILE = path.join(__dirname, ".versions.json");
 
 const APPCAST_ARM64 = "https://persistent.oaistatic.com/codex-app-prod/appcast.xml";
 const APPCAST_X64 = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
+const WINDOWS_TARGET_ARCH = "x64";
+const WINDOWS_X64_MSIX_RE = /^OpenAI\.Codex_\d+(?:\.\d+){2,3}_x64__[^/\\]+\.msix$/i;
 
 const args = process.argv.slice(2);
 const FORCE = args.includes("--force");
@@ -343,11 +345,70 @@ async function getWindowsVersion() {
   const info = await msstore.getAppInfo("9plm9xgg6vks", "US");
   if (!info.categoryId) throw new Error("No CategoryID");
   const pkgs = await msstore.getFileList(cookie, info.categoryId, "Retail");
-  if (pkgs.length === 0) throw new Error("No packages");
-  const pkg = pkgs[0];
+  const pkg = selectWindowsPackage(pkgs);
   const url = await msstore.getDownloadUrl(pkg.updateID, pkg.revisionNumber, "Retail", pkg.digest);
+  if (!url) throw new Error(`No download URL for Windows x64 package: ${pkg.name}`);
   const verMatch = pkg.name.match(/_(\d+\.\d+\.\d+(?:\.\d+)?)_/);
-  return { version: verMatch?.[1] || "unknown", url, packageName: pkg.name };
+  if (!verMatch) throw new Error(`Cannot parse Windows package version: ${pkg.name}`);
+  return {
+    version: verMatch[1],
+    url,
+    packageName: pkg.name,
+    architecture: WINDOWS_TARGET_ARCH,
+  };
+}
+
+function selectWindowsPackage(pkgs) {
+  const pkg = pkgs.find(({ name }) =>
+    typeof name === "string" && WINDOWS_X64_MSIX_RE.test(name)
+  );
+
+  if (pkg) return pkg;
+
+  const available = pkgs
+    .map(({ name }) => name)
+    .filter(Boolean)
+    .join(", ") || "(none)";
+  throw new Error(`No Windows x64 MSIX package found. Available packages: ${available}`);
+}
+
+function readWindowsPackageIdentity(extractDir) {
+  const manifestPath = path.join(extractDir, "AppxManifest.xml");
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error(`Windows package manifest not found: ${manifestPath}`);
+  }
+
+  const { XMLParser } = require("fast-xml-parser");
+  const parser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: "@_",
+    removeNSPrefix: true,
+  });
+  const parsed = parser.parse(fs.readFileSync(manifestPath, "utf-8"));
+  const identity = parsed.Package?.Identity;
+  const architecture = identity?.["@_ProcessorArchitecture"];
+  const version = identity?.["@_Version"];
+
+  if (!architecture || !version) {
+    throw new Error(`Windows package manifest has no architecture or version: ${manifestPath}`);
+  }
+
+  return { architecture: String(architecture).toLowerCase(), version: String(version) };
+}
+
+function validateWindowsPackage(extractDir, expected) {
+  const actual = readWindowsPackageIdentity(extractDir);
+  if (actual.architecture !== expected.architecture) {
+    throw new Error(
+      `Windows package architecture mismatch: expected ${expected.architecture}, got ${actual.architecture}`
+    );
+  }
+  if (expected.version && actual.version !== expected.version) {
+    throw new Error(
+      `Windows package version mismatch: expected ${expected.version}, got ${actual.version}`
+    );
+  }
+  return actual;
 }
 
 // ─── Extract macOS ──────────────────────────────────────────────
@@ -381,11 +442,10 @@ async function syncMac(variant, appcastUrl, destDir) {
 
 // ─── Extract Windows ────────────────────────────────────────────
 
-async function syncWin(destDir) {
+async function syncWin(destDir, info) {
   console.log("\n-- Windows");
-
-  const info = await getWindowsVersion();
-  console.log(`   version: ${info.version}`);
+  console.log(`   package: ${info.packageName}`);
+  console.log(`   version: ${info.version} (${info.architecture})`);
 
   const msixPath = path.join(TEMP_DIR, info.packageName || `codex-win-${info.version}.msix`);
   const extractDir = path.join(TEMP_DIR, "win-extract");
@@ -399,6 +459,9 @@ async function syncWin(destDir) {
   console.log("   [unzip]");
   clearDir(extractDir);
   extractArchive(msixPath, extractDir);
+
+  const identity = validateWindowsPackage(extractDir, info);
+  console.log(`   [verify] MSIX ${identity.architecture}, version ${identity.version}`);
 
   const resourcesDir = path.join(extractDir, "app", "resources");
   if (!fs.existsSync(resourcesDir)) {
@@ -485,11 +548,9 @@ async function main() {
   }
 
   if (!SKIP_WIN) {
-    try {
-      const winInfo = await getWindowsVersion();
-      console.log(`   win:       ${winInfo.version}`);
-      results.win = winInfo;
-    } catch (e) { console.error(`   [x] win check: ${e.message}`); }
+    const winInfo = await getWindowsVersion();
+    console.log(`   win-x64:   ${winInfo.version} (${winInfo.packageName})`);
+    results.win = winInfo;
   }
 
   if (CHECK_ONLY) {
@@ -509,9 +570,7 @@ async function main() {
     } catch (e) { console.error(`   [x] mac-x64: ${e.message}`); }
   }
   if (!SKIP_WIN && results.win) {
-    try {
-      results.win = await syncWin(path.join(SRC_DIR, "win"));
-    } catch (e) { console.error(`   [x] win: ${e.message}`); }
+    results.win = await syncWin(path.join(SRC_DIR, "win"), results.win);
   }
 
   const saved = loadVersions();
@@ -526,4 +585,12 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+module.exports = {
+  readWindowsPackageIdentity,
+  selectWindowsPackage,
+  validateWindowsPackage,
+};
+
+if (require.main === module) {
+  main().catch((e) => { console.error(`\n[x] ${e.message}`); process.exit(1); });
+}

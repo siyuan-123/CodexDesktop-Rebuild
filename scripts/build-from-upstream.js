@@ -15,6 +15,7 @@
 const fs = require("fs");
 const path = require("path");
 const { execSync, execFileSync } = require("child_process");
+const { validateWindowsPackage } = require("./sync-upstream");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -255,6 +256,17 @@ function buildWin(platform) {
 
   if (!fs.existsSync(appDir)) {
     console.error(`[x] MSIX extract not found. Run sync-upstream first.`);
+    process.exit(1);
+  }
+
+  // 即使绕过同步步骤，也禁止将旧的 ARM64 缓存打包成 x64 产物。
+  try {
+    const identity = validateWindowsPackage(extractDir, {
+      architecture: "x64",
+    });
+    console.log(`   [verify] MSIX ${identity.architecture}, version ${identity.version}`);
+  } catch (e) {
+    console.error(`[x] ${e.message}`);
     process.exit(1);
   }
 

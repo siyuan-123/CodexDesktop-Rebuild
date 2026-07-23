@@ -38,6 +38,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Test Windows package selection
+        run: npm test
+
       - name: Check upstream versions
         id: detect
         run: |
