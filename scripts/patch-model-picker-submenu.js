@@ -28,8 +28,9 @@ const TARGET_SIGNATURES = [
 // 高级选择器行组件先构造 SubmenuItem，再按运行平台选择内联或 Flyout 渲染。
 const INLINE_BRANCH_RE =
   /let ([\w$]+)=([\w$]+);if\(([\w$]+)\(\)\)return \1;let ([\w$]+);/g;
+// labelOnly 是上游后来新增的可选属性，字段存在与否不应影响标签变量定位。
 const ROW_PROPS_RE =
-  /\{ariaLabel:[\w$]+,label:([\w$]+),value:[\w$]+,children:[\w$]+,disabled:[\w$]+,contentClassName:[\w$]+,flyoutHeader:[\w$]+\}=[\w$]+/g;
+  /\{ariaLabel:[\w$]+,label:([\w$]+),value:[\w$]+,children:[\w$]+,disabled:[\w$]+,(?:labelOnly:[\w$]+,)?contentClassName:[\w$]+,flyoutHeader:[\w$]+\}=[\w$]+/g;
 const LEGACY_CONDITION_RE =
   /if\(([\w$]+)\(\)\|\|([\w$]+)\?\.props\?\.\[`data-model-picker-model-row`\]===!0\)/g;
 
