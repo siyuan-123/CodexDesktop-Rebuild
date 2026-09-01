@@ -28,11 +28,15 @@ env:
 jobs:
   build-mac:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'mac' }}
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -50,6 +54,7 @@ jobs:
         with:
           name: Codex-macOS-${{ matrix.arch }}
           path: out/*.dmg
+          if-no-files-found: error
 
   build-windows:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'windows' }}
@@ -76,6 +81,7 @@ jobs:
         with:
           name: Codex-Windows-x64
           path: out/*.zip
+          if-no-files-found: error
 
   build-linux:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platform == 'all' || inputs.platform == 'linux' }}
@@ -113,3 +119,4 @@ jobs:
             out/make/deb/**/*.deb
             out/make/rpm/**/*.rpm
             out/make/zip/**/*.zip
+          if-no-files-found: error

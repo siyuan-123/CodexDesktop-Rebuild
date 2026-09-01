@@ -81,11 +81,15 @@ jobs:
   build-mac:
     needs: check
     if: needs.check.outputs.has_update == 'true'
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, arm64]
+        include:
+          - arch: x64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -227,8 +231,9 @@ jobs:
       always() &&
       needs.check.result == 'success' &&
       needs.check.outputs.has_update == 'true' &&
-      !contains(needs.*.result, 'failure') &&
-      !contains(needs.*.result, 'cancelled')
+      needs.build-mac.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -245,6 +250,37 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Validate required artifacts
+        shell: bash
+        run: |
+          required_artifacts=(
+            "Codex-macOS-x64"
+            "Codex-macOS-arm64"
+            "Codex-Windows-x64"
+            "Codex-Linux-x64"
+            "Codex-Linux-arm64"
+          )
+
+          missing=0
+          for artifact in "${required_artifacts[@]}"; do
+            if [ ! -d "artifacts/$artifact" ] || [ -z "$(find "artifacts/$artifact" -type f -print -quit)" ]; then
+              echo "::error::Missing or empty required artifact: $artifact"
+              missing=1
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
+      - name: Display structure
+        run: ls -lhR artifacts/
 
       - name: Get upstream version and tag
         id: version
@@ -283,14 +319,6 @@ jobs:
             git tag -a "v${VERSION}" -m "Codex ${VERSION}"
             git push origin HEAD --tags
           fi
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v7
-        with:
-          path: artifacts
-
-      - name: Display structure
-        run: ls -lhR artifacts/
 
       - name: Create Release
         if: steps.version.outputs.version != ''
