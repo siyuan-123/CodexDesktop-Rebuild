@@ -21,6 +21,7 @@ const PATCHES = [
   "patch-codex-home-env.js",
   "patch-model-catalog-filter.js",
   "patch-model-picker-submenu.js",
+  "patch-thread-file-manager-action.js",
   "patch-plugin-auth.js",
   "patch-remote-control.js",
   "patch-composer-workspace-root.js",
