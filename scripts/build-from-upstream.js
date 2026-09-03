@@ -115,6 +115,50 @@ function packAsar(asarDir, asarPath, extraArgs = []) {
   });
 }
 
+function isRetryableHdiutilError(error) {
+  const output = [error?.message, error?.stdout, error?.stderr]
+    .filter(Boolean)
+    .map(String)
+    .join("\n");
+  return /resource (?:temporarily unavailable|busy)/i.test(output);
+}
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function createDmg(sourceDir, dmgPath, options = {}) {
+  const {
+    attempts = 3,
+    retryDelayMs = 5000,
+    run = execFileSync,
+    wait = sleepSync,
+    log = console.log,
+  } = options;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      run("hdiutil", [
+        "create",
+        "-volname", "Codex",
+        "-srcfolder", sourceDir,
+        "-ov",
+        "-format", "UDZO",
+        dmgPath,
+      ], { stdio: "pipe" });
+      return;
+    } catch (error) {
+      if (attempt === attempts || !isRetryableHdiutilError(error)) throw error;
+
+      // hdiutil 偶尔会留下不完整镜像，重试前必须清理。
+      fs.rmSync(dmgPath, { force: true });
+      const delay = retryDelayMs * attempt;
+      log(`   [retry ${attempt}/${attempts - 1}] hdiutil resource busy; retrying in ${delay}ms`);
+      wait(delay);
+    }
+  }
+}
+
 function resolveCodexVendor(platform) {
   const triple = TARGET_TRIPLE_MAP[platform];
   if (!triple) return null;
@@ -240,7 +284,7 @@ function buildMac(platform) {
   const dmgName = `Codex-${platform}-${version}.dmg`;
   const dmgPath = path.join(OUT_DIR, dmgName);
   console.log(`   [dmg] ${dmgName}`);
-  execSync(`hdiutil create -volname Codex -srcfolder "${outAppDir}" -ov -format UDZO "${dmgPath}"`, { stdio: "pipe" });
+  createDmg(outAppDir, dmgPath);
   const sizeMB = (fs.statSync(dmgPath).size / 1048576).toFixed(1);
   console.log(`   [ok] ${dmgPath} (${sizeMB} MB)`);
 }
@@ -474,4 +518,10 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { computeAsarHeaderHash, isOwlRuntime, patchExeHash };
+module.exports = {
+  computeAsarHeaderHash,
+  createDmg,
+  isOwlRuntime,
+  isRetryableHdiutilError,
+  patchExeHash,
+};
