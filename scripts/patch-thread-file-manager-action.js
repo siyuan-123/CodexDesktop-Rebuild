@@ -2,9 +2,11 @@
 /**
  * 将对话右键菜单的系统文件管理器入口提升到顶层。
  *
- * 26.825 起，上游把工作区的所有打开目标统一收进“打开方式”子菜单。
- * 本补丁保留该子菜单，同时复用同一打开链路增加顶层入口；直接打开不会
- * 改写用户的默认打开目标。旧版若已提供 open-thread-folder，则安全跳过。
+ * 26.825 起，上游把工作区的所有打开目标统一收进“打开方式”子菜单；
+ * 26.901 又把侧边栏会话菜单拆到 app-primary，并仅为 Git 会话调用该菜单。
+ * 本补丁先复用打开链路增加顶层入口，再放宽侧边栏的 Git 限制，使所有
+ * 有工作目录的本地会话都能显示入口。旧版若已提供 open-thread-folder，
+ * 则安全跳过。
  *
  * Usage:
  *   node scripts/patch-thread-file-manager-action.js [platform]
@@ -16,12 +18,19 @@ const { locateBundles, relPath } = require("./patch-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 const MARKER = "/* Codex：对话菜单直接显示系统文件管理器入口。 */";
+const SIDEBAR_MARKER =
+  "/* Codex：侧边栏会话菜单对普通目录显示打开入口。 */";
 const DIRECT_ACTION_ID = "open-workspace-file-manager-direct";
 const PATCHABLE_SIGNATURES = [
   "localConversation.openTarget.error",
   "localConversationPage.openPrimaryTarget",
   "persistPreferredTargetPath",
-  "threadHeader.copyActions",
+];
+const SIDEBAR_PATCHABLE_SIGNATURES = [
+  "id:`rename-thread`",
+  "id:`archive-thread`",
+  "id:`open-in-new-window`",
+  "remote_control_connections",
 ];
 
 function walk(node, visitor) {
@@ -35,6 +44,23 @@ function walk(node, visitor) {
       walk(value, visitor);
     }
   }
+}
+
+function walkWithAncestors(node, visitor, ancestors = []) {
+  if (!node || typeof node !== "object") return;
+  if (node.type) {
+    visitor(node, ancestors);
+    ancestors.push(node);
+  }
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "type" || key === "start" || key === "end") continue;
+    if (Array.isArray(value)) {
+      for (const child of value) walkWithAncestors(child, visitor, ancestors);
+    } else if (value && typeof value === "object" && value.type) {
+      walkWithAncestors(value, visitor, ancestors);
+    }
+  }
+  if (node.type) ancestors.pop();
 }
 
 function propertyName(property) {
@@ -80,6 +106,45 @@ function functionBindings(node) {
     }
   }
   return direct;
+}
+
+function bodyObjectBindings(node, sourceBinding) {
+  if (sourceBinding == null) return new Map();
+  for (const statement of node.body.body) {
+    if (statement.type !== "VariableDeclaration") continue;
+    for (const declaration of statement.declarations) {
+      if (
+        declaration.id?.type === "ObjectPattern" &&
+        declaration.init?.type === "Identifier" &&
+        declaration.init.name === sourceBinding
+      ) {
+        return objectPatternBindings(declaration.id);
+      }
+    }
+  }
+  return new Map();
+}
+
+function objectExpressionProperties(node) {
+  const properties = new Map();
+  if (node?.type !== "ObjectExpression") return properties;
+  for (const property of node.properties) {
+    if (property.type !== "Property") continue;
+    const key = propertyName(property);
+    if (key != null) properties.set(key, property.value);
+  }
+  return properties;
+}
+
+function memberName(node) {
+  if (node?.type !== "MemberExpression") return null;
+  if (!node.computed && node.property?.type === "Identifier") {
+    return node.property.name;
+  }
+  if (node.computed && node.property?.type === "Literal") {
+    return node.property.value;
+  }
+  return null;
 }
 
 function hasNativeDirectAction(source) {
@@ -166,6 +231,90 @@ function findPatchContext(ast, source) {
   });
 
   return { menuBuilders, openHelpers };
+}
+
+function findSidebarPatchContexts(ast, source) {
+  const contexts = [];
+
+  walk(ast, (functionNode) => {
+    if (
+      functionNode.type !== "FunctionDeclaration" ||
+      functionNode.id?.type !== "Identifier"
+    ) {
+      return;
+    }
+
+    const code = source.slice(functionNode.start, functionNode.end);
+    if (
+      !SIDEBAR_PATCHABLE_SIGNATURES.every((signature) =>
+        code.includes(signature),
+      )
+    ) {
+      return;
+    }
+
+    const bindings = functionBindings(functionNode);
+    const scope = bindings.get("scope");
+    const target = bindings.get("target");
+    const targetBindings = bodyObjectBindings(functionNode, target);
+    const conversationId = targetBindings.get("conversationId");
+    const hostId = targetBindings.get("hostId");
+    if (scope == null || conversationId == null || hostId == null) return;
+
+    walkWithAncestors(functionNode.body, (node, ancestors) => {
+      if (node.type !== "CallExpression") return;
+      const properties = objectExpressionProperties(node.arguments[0]);
+      if (
+        properties.get("scope")?.type !== "Identifier" ||
+        properties.get("scope").name !== scope ||
+        !properties.has("cwd") ||
+        properties.get("hostId")?.type !== "Identifier" ||
+        properties.get("hostId").name !== hostId
+      ) {
+        return;
+      }
+
+      const spread = ancestors.at(-1);
+      const pushCall = ancestors.at(-2);
+      const logical = ancestors.at(-3);
+      if (
+        spread?.type !== "SpreadElement" ||
+        spread.argument !== node ||
+        pushCall?.type !== "CallExpression" ||
+        memberName(pushCall.callee) !== "push" ||
+        logical?.type !== "LogicalExpression" ||
+        logical.operator !== "&&" ||
+        logical.right !== pushCall ||
+        logical.left?.type !== "LogicalExpression" ||
+        logical.left.operator !== "&&"
+      ) {
+        return;
+      }
+
+      const gitGate = logical.left.right;
+      if (
+        gitGate?.type !== "CallExpression" ||
+        gitGate.callee?.type !== "MemberExpression" ||
+        memberName(gitGate.callee) !== "get" ||
+        gitGate.callee.object?.type !== "Identifier" ||
+        gitGate.callee.object.name !== scope ||
+        !gitGate.arguments.some(
+          (argument) =>
+            argument.type === "Identifier" && argument.name === conversationId,
+        )
+      ) {
+        return;
+      }
+
+      contexts.push({
+        logical,
+        preservedCondition: logical.left.left,
+        pushCall,
+      });
+    });
+  });
+
+  return contexts;
 }
 
 function fileManagerMessageExpression(platformVariable) {
@@ -286,8 +435,49 @@ function patchSource(source) {
   return { status: "patched", source: next };
 }
 
+function patchSidebarSource(source) {
+  if (source.includes(SIDEBAR_MARKER)) {
+    return { status: "already-patched", source };
+  }
+  if (hasNativeDirectAction(source)) {
+    return { status: "native", source };
+  }
+
+  let ast;
+  try {
+    ast = parse(source);
+  } catch (error) {
+    return { status: "parse-failed", phase: "before", error, source };
+  }
+
+  const contexts = findSidebarPatchContexts(ast, source);
+  if (contexts.length !== 1) {
+    return {
+      status: "unexpected-sidebar-menu-gate-count",
+      count: contexts.length,
+      source,
+    };
+  }
+
+  const [{ logical, preservedCondition, pushCall }] = contexts;
+  const replacement =
+    source.slice(preservedCondition.start, preservedCondition.end) +
+    `&&${SIDEBAR_MARKER}` +
+    source.slice(pushCall.start, pushCall.end);
+  const next =
+    source.slice(0, logical.start) + replacement + source.slice(logical.end);
+
+  try {
+    parse(next);
+  } catch (error) {
+    return { status: "parse-failed", phase: "after", error, source };
+  }
+
+  return { status: "patched", source: next };
+}
+
 function findTargets(platform) {
-  return locateBundles({
+  const openMenuTargets = locateBundles({
     dir: "assets",
     pattern: /^app-initial-.*\.js$/,
     ...(platform ? { platform } : {}),
@@ -296,12 +486,19 @@ function findTargets(platform) {
       ...target,
       source: fs.readFileSync(target.path, "utf-8"),
     }))
-    .filter(
-      ({ source }) =>
-        source.includes(MARKER) ||
-        hasNativeDirectAction(source) ||
-        PATCHABLE_SIGNATURES.every((signature) => source.includes(signature)),
-    );
+    .map((target) => ({ ...target, patchKind: "open-menu" }));
+  const sidebarTargets = locateBundles({
+    dir: "assets",
+    pattern: /^app-primary-.*\.js$/,
+    ...(platform ? { platform } : {}),
+  })
+    .map((target) => ({
+      ...target,
+      source: fs.readFileSync(target.path, "utf-8"),
+    }))
+    .map((target) => ({ ...target, patchKind: "sidebar" }));
+
+  return [...openMenuTargets, ...sidebarTargets];
 }
 
 function main() {
@@ -319,7 +516,10 @@ function main() {
   let failed = 0;
   for (const target of targets) {
     const label = relPath(target.path);
-    const result = patchSource(target.source);
+    const result =
+      target.patchKind === "sidebar"
+        ? patchSidebarSource(target.source)
+        : patchSource(target.source);
 
     if (result.status === "native") {
       console.log(
@@ -333,10 +533,14 @@ function main() {
     }
     if (result.status === "patched") {
       if (isCheck) {
-        console.log(`  [?] ${label}: would expose the file manager action`);
+        console.log(
+          `  [?] ${label}: would expose the file manager action (${target.patchKind})`,
+        );
       } else {
         fs.writeFileSync(target.path, result.source, "utf-8");
-        console.log(`  [ok] ${label}: file manager action exposed`);
+        console.log(
+          `  [ok] ${label}: file manager action exposed (${target.patchKind})`,
+        );
       }
       patched++;
       continue;
@@ -361,7 +565,9 @@ if (require.main === module) main();
 module.exports = {
   DIRECT_ACTION_ID,
   MARKER,
+  SIDEBAR_MARKER,
   findTargets,
   hasNativeDirectAction,
+  patchSidebarSource,
   patchSource,
 };

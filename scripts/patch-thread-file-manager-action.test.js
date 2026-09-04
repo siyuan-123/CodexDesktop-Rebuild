@@ -6,7 +6,9 @@ const vm = require("node:vm");
 const {
   DIRECT_ACTION_ID,
   MARKER,
+  SIDEBAR_MARKER,
   hasNativeDirectAction,
+  patchSidebarSource,
   patchSource,
 } = require("./patch-thread-file-manager-action");
 
@@ -37,7 +39,9 @@ function createGroupedMenuBundle(options = {}) {
     "}",
     "})",
     "}",
-    "const copyMessage=`threadHeader.copyActions`;",
+    ...(options.includeCopySignature === false
+      ? []
+      : ["const copyMessage=`threadHeader.copyActions`;"]),
   ].join("");
   return openHelper + menuBuilder;
 }
@@ -69,6 +73,38 @@ function evaluatePatchedMenu(source, platform) {
   return context;
 }
 
+function createSidebarMenuBundle() {
+  return [
+    "function buildThreadMenu({scope:s,target:t}){",
+    "let{conversationId:id,hostId:h,cwd:c}=t,items=[];",
+    "let primary=[{id:`rename-thread`},{id:`archive-thread`}];",
+    "return c!=null&&!getState(s.get,`remote_control_connections`)",
+    "?.some(item=>item.hostId===h)&&s.get(gitBacked,id)",
+    "&&items.push(...buildOpenItems({scope:s,cwd:normalize(c),hostId:h})),",
+    "items.push({id:`open-in-new-window`}),",
+    "[...primary,...items]",
+    "}",
+  ].join("");
+}
+
+function evaluatePatchedSidebar(source, options = {}) {
+  const context = {
+    gitBacked: {},
+    getState: () => options.remoteConnections ?? [],
+    normalize: (cwd) => cwd,
+    buildOpenItems: () => [{ id: DIRECT_ACTION_ID }],
+    scope: { get: () => false },
+  };
+  vm.runInNewContext(
+    `${source};result=buildThreadMenu({scope,target:{` +
+      `conversationId:\`thread-1\`,hostId:\`local\`,cwd:${
+        options.cwd === null ? "null" : "`C:\\\\repo`"
+      }}})`,
+    context,
+  );
+  return context.result;
+}
+
 test("新版对话菜单增加顶层文件管理器入口并保留打开方式子菜单", () => {
   const result = patchSource(createGroupedMenuBundle());
 
@@ -93,6 +129,69 @@ test("新版对话菜单增加顶层文件管理器入口并保留打开方式�
       sourceType: "module",
     }),
   );
+});
+
+test("候选识别不依赖上游已移除的复制动作签名", () => {
+  const source = createGroupedMenuBundle({ includeCopySignature: false });
+
+  assert.equal(source.includes("threadHeader.copyActions"), false);
+  assert.equal(patchSource(source).status, "patched");
+});
+
+test("侧边栏普通目录会话不再受 Git 仓库门控", () => {
+  const original = createSidebarMenuBundle();
+  const result = patchSidebarSource(original);
+
+  assert.equal(result.status, "patched");
+  assert.ok(result.source.includes(SIDEBAR_MARKER));
+  assert.doesNotMatch(result.source, /s\.get\(gitBacked,id\)/);
+  assert.equal(
+    evaluatePatchedSidebar(result.source).some(
+      (item) => item.id === DIRECT_ACTION_ID,
+    ),
+    true,
+  );
+  assert.doesNotThrow(() =>
+    acorn.parse(result.source, {
+      ecmaVersion: "latest",
+      sourceType: "module",
+    }),
+  );
+});
+
+test("侧边栏入口仍要求工作目录且排除远程控制连接", () => {
+  const { source } = patchSidebarSource(createSidebarMenuBundle());
+
+  assert.equal(
+    evaluatePatchedSidebar(source, { cwd: null }).some(
+      (item) => item.id === DIRECT_ACTION_ID,
+    ),
+    false,
+  );
+  assert.equal(
+    evaluatePatchedSidebar(source, {
+      remoteConnections: [{ hostId: "local" }],
+    }).some((item) => item.id === DIRECT_ACTION_ID),
+    false,
+  );
+});
+
+test("侧边栏补丁重复执行保持幂等", () => {
+  const first = patchSidebarSource(createSidebarMenuBundle());
+  const second = patchSidebarSource(first.source);
+
+  assert.equal(first.status, "patched");
+  assert.equal(second.status, "already-patched");
+  assert.equal(second.source, first.source);
+});
+
+test("侧边栏结构变化时明确失败而不是静默跳过", () => {
+  const result = patchSidebarSource(
+    "function changedThreadMenu(){return [{id:`rename-thread`}]}",
+  );
+
+  assert.equal(result.status, "unexpected-sidebar-menu-gate-count");
+  assert.equal(result.count, 0);
 });
 
 test("补丁重复执行保持幂等", () => {

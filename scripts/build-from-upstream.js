@@ -347,18 +347,7 @@ function buildWin(platform) {
   console.log(`   [integrity] new hash: ${newHash.slice(0, 16)}...`);
 
   if (oldHash !== newHash) {
-    if (isOwlRuntime(outApp)) {
-      // Owl runtime 不在可执行文件中嵌入 Electron ASAR 头哈希。
-      console.log("   [integrity] Owl runtime has no embedded ASAR header hash");
-    } else {
-      // 旧 Electron Windows 包把 ASAR 头哈希嵌入 Codex.exe。
-      const exePath = path.join(outApp, "Codex.exe");
-      if (fs.existsSync(exePath)) {
-        patchExeHash(exePath, oldHash, newHash);
-      } else {
-        console.log("   [!] Codex.exe not found for hash patching");
-      }
-    }
+    patchWindowsAsarIntegrity(outApp, oldHash, newHash);
   }
 
   // Keep the upstream Windows codex.exe. The Desktop app-server and
@@ -394,11 +383,34 @@ function patchExeHash(exePath, oldHash, newHash) {
   const idx = buf.indexOf(oldBuf);
   if (idx < 0) {
     console.log("   [!] old hash not found in exe");
-    return;
+    return false;
   }
   Buffer.from(newHash, "ascii").copy(buf, idx);
   fs.writeFileSync(exePath, buf);
   console.log(`   [integrity] exe hash patched at offset ${idx}`);
+  return true;
+}
+
+function patchWindowsAsarIntegrity(appDir, oldHash, newHash) {
+  // 新版 Owl 把 Electron ASAR 哈希嵌入 ChatGPT.exe；旧版运行时则使用 Codex.exe。
+  // 根据实际嵌入内容选择目标，避免仅凭运行时标记作出错误假设。
+  const executableNames = isOwlRuntime(appDir)
+    ? ["ChatGPT.exe", "Codex.exe"]
+    : ["Codex.exe", "ChatGPT.exe"];
+  const oldHashBytes = Buffer.from(oldHash, "ascii");
+
+  for (const executableName of executableNames) {
+    const exePath = path.join(appDir, executableName);
+    if (!fs.existsSync(exePath)) continue;
+    if (!fs.readFileSync(exePath).includes(oldHashBytes)) continue;
+
+    patchExeHash(exePath, oldHash, newHash);
+    console.log(`   [integrity] runtime executable: ${executableName}`);
+    return exePath;
+  }
+
+  console.log("   [integrity] no embedded ASAR header hash found in Windows runtime executables");
+  return null;
 }
 
 function updateAsarIntegrity(asarPath, infoPlistPath) {
@@ -524,4 +536,5 @@ module.exports = {
   isOwlRuntime,
   isRetryableHdiutilError,
   patchExeHash,
+  patchWindowsAsarIntegrity,
 };
