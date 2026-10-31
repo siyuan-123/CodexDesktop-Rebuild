@@ -21,10 +21,11 @@
  * resourceLimits 只在 GC 检查点核对，必须显著低于 cage 崩溃线才有
  * 机会先优雅 OOM；1024 仍是正常基线（52MB）的 20 倍。
  *
- * 只动 worker-manager 的 ensureWorker 构造点（锚点唯一）；
- * child-process-snapshot 等短命 worker 不动。
+ * 只动 worker-manager 的构造点，child-process-snapshot 等短命 worker 不动。
+ * 新版 Git worker 使用 utilityProcess.fork，通过 Chromium 的 --js-flags 设置 1GB 老生代上限。
+ * 直接传 Node 的 --max-old-space-size 不生效，必须使用 Electron 的参数入口。
  *
- * 幂等：构造点已含 resourceLimits 即跳过。写入前 acorn 校验。
+ * 幂等：线程和独立进程两处均有已知上限时跳过；未知上限报错。写入前 acorn 校验。
  *
  * Usage:
  *   node scripts/patch-worker-limits.js [platform]   # mac-arm64 | mac-x64 | win | 省略=全部
@@ -32,9 +33,10 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 const LIMITS = "resourceLimits:{maxOldGenerationSizeMb:1024,maxYoungGenerationSizeMb:128}";
+const UTILITY_HEAP_FLAG = "--js-flags=--max-old-space-size=1024";
 // 已注入的旧上限（用于降级/升级替换）
 const STALE_LIMITS = [
   "resourceLimits:{maxOldGenerationSizeMb:1536,maxYoungGenerationSizeMb:128}",
@@ -97,6 +99,21 @@ function findManagerWorkerOptions(ast) {
   return matches;
 }
 
+function findGitUtilityOptions(ast) {
+  const matches = [];
+  walk(ast, (node) => {
+    if (node.type !== "CallExpression" || node.callee?.property?.name !== "fork" ||
+      node.callee.object?.property?.name !== "utilityProcess") return;
+    const options = node.arguments[2];
+    if (options?.type !== "ObjectExpression") return;
+    const service = options.properties.find((prop) => propertyName(prop) === "serviceName")?.value;
+    const name = service?.type === "Literal" ? service.value :
+      service?.type === "TemplateLiteral" && service.expressions.length === 0 ? service.quasis[0].value.cooked : null;
+    if (name === "Git worker") matches.push(options);
+  });
+  return matches;
+}
+
 function patchSource(source) {
   let code = source;
   let upgraded = false;
@@ -119,6 +136,7 @@ function patchSource(source) {
   }
 
   const options = matches[0];
+  const edits = [];
   const existing = options.properties.find(
     (property) => propertyName(property) === "resourceLimits",
   );
@@ -126,20 +144,42 @@ function patchSource(source) {
     if (code.slice(existing.start, existing.end) !== LIMITS) {
       return { status: "unexpected-existing-limits", source };
     }
-    return upgraded
-      ? { status: "patched", mode: "upgraded", source: code }
-      : { status: "already-patched", source: code };
+  } else {
+    edits.push({ start: options.end - 1, end: options.end - 1,
+      replacement: `${options.properties.length > 0 ? "," : ""}${LIMITS}` });
   }
 
-  const insertion = `${options.properties.length > 0 ? "," : ""}${LIMITS}`;
-  const insertAt = options.end - 1;
-  const next = code.slice(0, insertAt) + insertion + code.slice(insertAt);
+  const utilities = findGitUtilityOptions(ast);
+  if (utilities.length > 1) return { status: "unexpected-anchor-count", count: utilities.length, source };
+  for (const utility of utilities) {
+    const argv = utility.properties.find((prop) => propertyName(prop) === "execArgv");
+    if (!argv) {
+      edits.push({ start: utility.end - 1, end: utility.end - 1,
+        replacement: `,execArgv:[${JSON.stringify(UTILITY_HEAP_FLAG)}]` });
+    } else {
+      const elements = argv.value?.type === "ArrayExpression" ? argv.value.elements : null;
+      if (!elements || elements.some((element) => element?.type !== "Literal" || typeof element.value !== "string")) {
+        return { status: "unexpected-existing-limits", source };
+      }
+      const heapFlags = elements.filter((element) => /^--(?:js-flags|max[-_]old[-_]space[-_]size)/.test(element.value));
+      if (heapFlags.length > 1 || (heapFlags.length === 1 && heapFlags[0].value !== UTILITY_HEAP_FLAG)) {
+        return { status: "unexpected-existing-limits", source };
+      }
+      if (heapFlags.length === 0) edits.push({ start: argv.value.end - 1, end: argv.value.end - 1,
+        replacement: `${elements.length ? "," : ""}${JSON.stringify(UTILITY_HEAP_FLAG)}` });
+    }
+  }
+  if (edits.length === 0 && !upgraded) return { status: "already-patched", source };
+  let next = code;
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    next = next.slice(0, edit.start) + edit.replacement + next.slice(edit.end);
+  }
   try {
     parseCode(next);
   } catch (error) {
     return { status: "parse-failed", error, source };
   }
-  return { status: "patched", mode: "added", source: next };
+  return { status: "patched", mode: upgraded ? "upgraded" : "added", source: next };
 }
 
 function main() {
@@ -149,15 +189,14 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main-.*\.js$/,
+  const bundles = locateBuildTargets({
     platform,
+    label: "Worker resource limits",
+    test: (source) => source.includes("ensureWorker") && source.includes("workerData"),
   });
 
   if (bundles.length === 0) {
-    console.log("  [skip] main bundle not found");
-    return;
+    throw new Error("Worker manager bundle not found");
   }
 
   let patched = 0;
@@ -203,4 +242,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { LIMITS, findManagerWorkerOptions, patchSource };
+module.exports = { LIMITS, UTILITY_HEAP_FLAG, findManagerWorkerOptions, patchSource };

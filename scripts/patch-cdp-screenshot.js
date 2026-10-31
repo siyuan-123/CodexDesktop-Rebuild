@@ -30,7 +30,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 const MARKER = "__codexCdpGuard";
 
@@ -41,7 +41,7 @@ const GUARD_DEF =
   MARKER +
   "=function(m,p){try{if(m===`Page.captureScreenshot`&&p&&typeof p==`object`&&p.captureBeyondViewport===!0){var q={};for(var k in p)q[k]=p[k];q.captureBeyondViewport=!1;delete q.clip;(q.format==null||q.format===`png`)&&(q.format=`jpeg`,q.quality=60);return q}}catch(e){}return p};\n";
 
-// CDP 统一转发点（sendDebuggerCommand 内部）——main bundle 中唯一
+// CDP 统一转发点（sendDebuggerCommand 内部），不依赖所在 chunk 的文件名。
 const ANCHOR =
   "return await hY(e.webContents.debugger.sendCommand(t,n,i),this.cdpCommandTimeoutMs,";
 const REPLACEMENT =
@@ -65,6 +65,37 @@ function parseOk(code) {
   }
 }
 
+function walk(node, visit) {
+  if (!node?.type) return;
+  visit(node);
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) value.forEach((child) => walk(child, visit));
+    else if (value?.type) walk(value, visit);
+  }
+}
+
+function patchDebuggerCommand(code) {
+  let ast;
+  try { ast = acorn.parse(code, { ecmaVersion: 2022, sourceType: "module" }); } catch { return null; }
+  const patches = [];
+  walk(ast, (node) => {
+    if (node.type !== "CallExpression" || node.callee?.type !== "MemberExpression" ||
+      node.callee.property?.name !== "sendCommand" || node.arguments.length < 2) return;
+    const calleeSource = code.slice(node.callee.start, node.callee.end);
+    const methodArg = node.arguments[0];
+    const params = node.arguments[1];
+    // 统一浏览器转发点的参数是 (method, params, sessionId)。
+    // 其他 CDP 调用多以字符串 + 对象字面量出现，避免误包裹。
+    if (!calleeSource.includes("webContents.debugger") ||
+      methodArg.type !== "Identifier" || params.type !== "Identifier") return;
+    const method = code.slice(methodArg.start, methodArg.end);
+    patches.push({ start: params.start, end: params.end, replacement: `globalThis.${MARKER}(${method},${code.slice(params.start, params.end)})` });
+  });
+  if (patches.length !== 1) return null;
+  const patch = patches[0];
+  return code.slice(0, patch.start) + patch.replacement + code.slice(patch.end);
+}
+
 function patchSource(code) {
   if (code.includes(MARKER)) {
     return { status: "already-patched", source: code };
@@ -82,6 +113,8 @@ function patchSource(code) {
     );
     if (forwarded === code) forwarded = null;
   }
+
+  if (forwarded == null) forwarded = patchDebuggerCommand(code);
 
   if (forwarded == null) {
     const hasBrowserScreenshotPipeline =
@@ -108,15 +141,15 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main-.*\.js$/,
+  const bundles = locateBuildTargets({
     platform,
+    label: "CDP screenshot guard",
+    test: (source) => source.includes("sendDebuggerCommand") &&
+      source.includes("captureBeyondViewport"),
   });
 
   if (bundles.length === 0) {
-    console.log("  [skip] main bundle not found");
-    return;
+    throw new Error("CDP screenshot pipeline not found");
   }
 
   let patched = 0;

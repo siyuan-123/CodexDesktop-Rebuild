@@ -1,7 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { CAP_BYTES, patchSource } = require("./patch-git-output-cap");
+const { CAP_BYTES, hasGitExecutor, patchSource } = require("./patch-git-output-cap");
+
+test("共享 chunk 按参数解构识别 Git 执行器，不把调用方误判为目标", () => {
+  assert.equal(hasGitExecutor('function run(o){let{maxOutputBytes:n,collectOutput:c=!0}=o;return {outputLimitExceeded:false}}'), true);
+  assert.equal(hasGitExecutor('const options={maxOutputBytes:1024,collectOutput:false};const result={outputLimitExceeded:false};'), false);
+});
 
 test("Git 输出上限兼容压缩变量名变化", () => {
   const source =

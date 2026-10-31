@@ -38,7 +38,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Test Windows package selection
+      - name: Test patch compatibility and build scripts
         run: npm test
 
       - name: Check upstream versions

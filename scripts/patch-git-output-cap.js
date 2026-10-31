@@ -21,8 +21,8 @@
  * 任务报错但应用不死。
  *
  * 锚点：`maxOutputBytes:<变量>,collectOutput:<变量>=!0`（每个 bundle 内唯一）。
- * 同一 git 执行器还以副本形式打进了 src-*.js（其他进程用的共享库），
- * 一并覆盖；无锚点的 src-*.js 自动跳过。
+ * 同一 git 执行器可能出现在 worker、src 或 early-bootstrap 共享 chunk，
+ * 按执行器内容逐份定位，避免漏掉主进程调用。
  * 幂等：已含默认值即跳过。写入前 acorn 校验。
  *
  * Usage:
@@ -30,15 +30,34 @@
  *   node scripts/patch-git-output-cap.js --check      # 试运行，只报告
  */
 const fs = require("fs");
-const path = require("path");
 const acorn = require("acorn");
-const { relPath, SRC_DIR } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 const CAP_BYTES = 33554432;
 const ANCHOR_OLD_RE =
   /maxOutputBytes:([A-Z_$a-z][\w$]*),collectOutput:([A-Z_$a-z][\w$]*)=!0/g;
 const ANCHOR_NEW_RE =
   /maxOutputBytes:([A-Z_$a-z][\w$]*)=33554432,collectOutput:([A-Z_$a-z][\w$]*)=!0/g;
+
+function hasGitExecutor(source) {
+  if (!source.includes("maxOutputBytes") || !source.includes("collectOutput") ||
+    !source.includes("outputLimitExceeded")) return false;
+  const ast = acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
+  let found = false;
+  function visit(node) {
+    if (!node?.type || found) return;
+    if (node.type === "ObjectPattern") {
+      const keys = node.properties.map((property) => property.key?.name ?? property.key?.value);
+      if (keys.includes("maxOutputBytes") && keys.includes("collectOutput")) found = true;
+    }
+    for (const child of Object.values(node)) {
+      if (Array.isArray(child)) child.forEach(visit);
+      else if (child?.type) visit(child);
+    }
+  }
+  visit(ast);
+  return found;
+}
 
 function parseOk(code) {
   try {
@@ -93,26 +112,12 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  // locateBundles 对同一 pattern 只返回一个文件，这里需要目录下全部
-  // worker.js 与 src-*.js（git 执行器以副本形式存在于多个 bundle）。
-  const PLATFORMS = platform
-    ? [platform]
-    : ["mac-arm64", "mac-x64", "win"];
-  const bundles = [];
-  for (const plat of PLATFORMS) {
-    const d = path.join(SRC_DIR, plat, "_asar", ".vite", "build");
-    if (!fs.existsSync(d)) continue;
-    for (const f of fs.readdirSync(d)) {
-      if (f === "worker.js" || /^src-.*\.js$/.test(f)) {
-        bundles.push({ platform: plat, path: path.join(d, f) });
-      }
-    }
-  }
-
-  if (bundles.length === 0) {
-    console.log("  [skip] no target bundles found");
-    return;
-  }
+  const bundles = locateBuildTargets({
+    platform,
+    label: "Git executor output cap",
+    // 只有解构这些参数的执行器才是目标，传参的调用方不能误判为执行器。
+    test: hasGitExecutor,
+  });
 
   let patched = 0;
   let failed = 0;
@@ -170,4 +175,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { ANCHOR_NEW_RE, ANCHOR_OLD_RE, CAP_BYTES, patchSource };
+module.exports = { ANCHOR_NEW_RE, ANCHOR_OLD_RE, CAP_BYTES, hasGitExecutor, patchSource };

@@ -420,7 +420,8 @@ function locateTargets(platform) {
     const buildDir = path.join(SRC_DIR, plat, "_asar", ".vite", "build");
     if (fs.existsSync(buildDir)) {
       for (const f of fs.readdirSync(buildDir)) {
-        if (!f.startsWith("main-") || !f.endsWith(".js")) continue;
+        // 上游可将功能配置移至共享 chunk，文件名不再限定为 main-*。
+        if (!f.endsWith(".js")) continue;
         const fp = path.join(buildDir, f);
         const src = fs.readFileSync(fp, "utf-8");
         if (src.includes("externalBrowserUseAllowed") && src.includes("computerUse")) {
@@ -434,6 +435,27 @@ function locateTargets(platform) {
 }
 
 // ── Main ──
+
+function collectPatches(ast, source, rules) {
+  const collectors = {
+    auth: findPluginAuthPatches,
+    avail: findBrowserAvailPatches,
+    gate: findStatsigGatePatches,
+    features: findFeatureDefaultPatches,
+    goal: findGoalGatePatches,
+  };
+  const patches = rules.flatMap((rule) => collectors[rule](ast, source));
+  // 打包器的模块函数会包裹业务函数，嵌套遍历可能重复发现同一位置。
+  const unique = [...new Map(patches.map((patch) =>
+    [`${patch.start}:${patch.end}:${patch.replacement}`, patch])).values()]
+    .sort((a, b) => b.start - a.start);
+  for (let index = 1; index < unique.length; index++) {
+    if (unique[index].end > unique[index - 1].start) {
+      throw new Error(`Overlapping plugin patches: ${unique[index].id} / ${unique[index - 1].id}`);
+    }
+  }
+  return unique;
+}
 
 function main() {
   const args = process.argv.slice(2);
@@ -463,16 +485,7 @@ function main() {
     const ast = parse(source, { ecmaVersion: "latest", sourceType: "module" });
     console.log(`   parse: ${Date.now() - t0}ms`);
 
-    const patches = [];
-    if (bundle.rules.includes("auth")) patches.push(...findPluginAuthPatches(ast, source));
-    if (bundle.rules.includes("avail"))
-      patches.push(...findBrowserAvailPatches(ast, source));
-    if (bundle.rules.includes("gate"))
-      patches.push(...findStatsigGatePatches(ast, source));
-    if (bundle.rules.includes("features"))
-      patches.push(...findFeatureDefaultPatches(ast, source));
-    if (bundle.rules.includes("goal"))
-      patches.push(...findGoalGatePatches(ast, source));
+    const patches = collectPatches(ast, source, bundle.rules);
 
     if (patches.length === 0) {
       console.log("   [ok] Already patched or no match");
@@ -492,9 +505,12 @@ function main() {
       code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
+    parse(code, { ecmaVersion: "latest", sourceType: "module" });
     fs.writeFileSync(bundle.path, code, "utf-8");
     console.log(`   [ok] ${patches.length} gates patched`);
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { collectPatches };

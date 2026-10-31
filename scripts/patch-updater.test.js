@@ -10,21 +10,25 @@ test("更新器检查模式不写文件，应用模式禁用自动更新", () =>
   const source = "const updater={shouldIncludeUpdater(){return enabled},shouldIncludeSparkle(){return supported}};";
   for (const check of [true, false]) {
     const writes = [];
+    const module = { exports: {} };
+    const requireMock = (name) => {
+      if (name === "fs") return {
+        existsSync: () => true,
+        readdirSync: () => ["early-bootstrap-824-test.js"],
+        readFileSync: () => source,
+        writeFileSync: (_file, value) => writes.push(value),
+      };
+      if (name === "path") return path;
+      if (name === "acorn") return acorn;
+      if (name === "./patch-util") return { SRC_DIR: "fixture", relPath: value => value };
+      throw new Error(`非预期依赖: ${name}`);
+    };
+    requireMock.main = module;
     vm.runInNewContext(script, {
       process: { argv: ["node", "patch-updater.js", "win", ...(check ? ["--check"] : [])] },
       console: { log() {} },
-      require: (name) => {
-        if (name === "fs") return {
-          existsSync: () => true,
-          readdirSync: () => ["main-test.js"],
-          readFileSync: () => source,
-          writeFileSync: (_file, value) => writes.push(value),
-        };
-        if (name === "path") return path;
-        if (name === "acorn") return acorn;
-        if (name === "./patch-util") return { SRC_DIR: "fixture", relPath: value => value };
-        throw new Error(`非预期依赖: ${name}`);
-      },
+      require: requireMock,
+      module,
     });
     assert.equal(writes.length, check ? 0 : 1);
     if (!check) {

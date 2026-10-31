@@ -92,6 +92,14 @@ npm run dev
 
 ## CI/CD
 
+### 26.1027 构建与补丁兼容性
+
+26.1027 将主进程切分为 `early-bootstrap-<编号>-<hash>.js`。版权、开发者工具、worker 内存保护、CDP 截图和 Git 输出限制按内容逐平台定位，覆盖共享 chunk；目标缺失会中止构建。`CODEX_HOME` 初始化兼容匿名启动函数，diff 的 8MB 限额兼容内联常量，同时保留调用方更小的限额。
+
+更新器策略兼容箭头函数，覆盖 macOS、Windows 和 Linux；插件补丁去重重叠遍历产生的同位置替换并在写入前检查语法。Sentry 按同一平台的多个 chunk 识别上游已有的 breadcrumb 截断和 scope 文件保护。独立 Git worker 使用 Electron 的 `--js-flags=--max-old-space-size=1024`，其他 worker 继续通过 `resourceLimits` 限制内存。
+
+`npm test` 包含拆分 chunk、匿名函数、转义 HTML、更新器、截图参数、内存限额、只读检查及重复应用的回归测试。问题分析与真实包验证见 [2026-10-31 构建修复记录](docs/upgrades/2026-10-31-build-fix.md)。
+
 26.1021 上游将工作区与侧边栏菜单移至 `app-primary`；文件管理器补丁按菜单内容在 `app-initial` / `app-primary` 中逐平台定位，不再依赖远程连接配置名。补丁仍保留工作目录和远程连接条件、原生打开回调与错误提示；未知菜单结构会明确报错。
 
 构建兼容新版上游资源布局：macOS 保留 `codex-cli/CodexCLI.app` 内的同包 CLI；Linux 同时识别 npm 平台包的新旧目录，并安装匹配架构的 CLI、`rg`、code-mode host 与沙箱资源。缺少必要资源时立即失败，不再保留不能在 Linux 运行的 macOS 二进制。

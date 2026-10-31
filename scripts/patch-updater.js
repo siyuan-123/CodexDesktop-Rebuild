@@ -2,8 +2,8 @@
 /**
  * patch-updater.js — Disable Sparkle (macOS) and Windows auto-updater
  *
- * AST match: in the file containing shouldIncludeSparkle / shouldIncludeUpdater,
- * find these method definitions and replace their bodies to return false.
+ * 按方法名查找更新器策略，兼容对象方法、函数表达式和新版箭头函数。
+ * macOS / Windows / Linux 的更新器均返回 false，避免覆盖重建补丁。
  *
  * Specifically targets:
  *   shouldIncludeSparkle(e,t,n){return ...}  → return !1
@@ -19,6 +19,7 @@ const UPDATER_METHODS = new Set([
   "shouldIncludeSparkle",
   "shouldIncludeWindowsUpdater",
   "shouldIncludeWindowsMsixUpdater",
+  "shouldIncludeLinuxPackageUpdater",
   "shouldIncludeUpdater",
 ]);
 
@@ -46,20 +47,23 @@ function collectPatches(ast, source) {
     if (!UPDATER_METHODS.has(keyName)) return;
 
     const fn = node.value;
-    if (fn?.type !== "FunctionExpression") return;
+    if (!["FunctionExpression", "ArrowFunctionExpression"].includes(fn?.type)) return;
     const body = fn.body;
-    if (!body || body.type !== "BlockStatement") return;
-    if (body.body.length !== 1) return;
-    const ret = body.body[0];
-    if (ret.type !== "ReturnStatement" || !ret.argument) return;
+    let expression = body;
+    if (body?.type === "BlockStatement") {
+      if (body.body.length !== 1) throw new Error(`Unexpected updater body: ${keyName}`);
+      const ret = body.body[0];
+      if (ret.type !== "ReturnStatement" || !ret.argument) throw new Error(`Unexpected updater return: ${keyName}`);
+      expression = ret.argument;
+    }
 
-    const retSrc = source.slice(ret.argument.start, ret.argument.end);
-    if (retSrc === "!1") return;
+    const retSrc = source.slice(expression.start, expression.end);
+    if (retSrc === "!1" || retSrc === "false") return;
 
     patches.push({
       id: keyName,
-      start: ret.argument.start,
-      end: ret.argument.end,
+      start: expression.start,
+      end: expression.end,
       replacement: "!1",
       original: retSrc.length > 50 ? retSrc.slice(0, 47) + "..." : retSrc,
     });
@@ -130,4 +134,6 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = { collectPatches };

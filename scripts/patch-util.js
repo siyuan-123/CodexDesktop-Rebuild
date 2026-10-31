@@ -82,4 +82,31 @@ function relPath(absPath) {
   return path.relative(PROJECT_ROOT, absPath);
 }
 
-module.exports = { locateBundles, relPath, SRC_DIR, PROJECT_ROOT };
+/**
+ * 按内容查找全部主进程 chunk，兼容上游拆包及文件名变化。
+ * 每个请求平台必须有目标；不能让某个平台的命中掩盖另一个平台的遗漏。
+ * srcDir 允许回归测试使用独立目录，不接触本地已生成资源。
+ */
+function locateBuildTargets({ platform, test, label, srcDir = SRC_DIR }) {
+  const buildDir = (name) => path.join(srcDir, name, "_asar", ".vite", "build");
+  const platforms = platform
+    ? [platform]
+    : ["mac-arm64", "mac-x64", "win"].filter((name) => fs.existsSync(buildDir(name)));
+  if (platforms.length === 0) throw new Error(`${label}: no generated platform sources found`);
+
+  const targets = [];
+  for (const current of platforms) {
+    const directory = buildDir(current);
+    if (!fs.existsSync(directory)) throw new Error(`${label}: build directory missing for ${current}`);
+    const matches = fs.readdirSync(directory)
+      .filter((name) => name.endsWith(".js"))
+      .sort()
+      .map((name) => ({ platform: current, path: path.join(directory, name) }))
+      .filter((bundle) => test(fs.readFileSync(bundle.path, "utf8"), bundle.path));
+    if (matches.length === 0) throw new Error(`${label}: no matching build chunks for ${current}`);
+    targets.push(...matches);
+  }
+  return targets;
+}
+
+module.exports = { locateBundles, locateBuildTargets, relPath, SRC_DIR, PROJECT_ROOT };

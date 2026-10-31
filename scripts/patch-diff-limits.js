@@ -15,8 +15,9 @@
  * 超限文件会走 diff-too-large 分支被跳过/提示，不再全量入内存。
  * 不改 I1 的 64MB 总量上限（j1）、cat-file 的 5MB（k1）、turn-diff 的 1MB。
  *
- * 锚点：同一变量声明中连续出现 5MB、32MB、64MB 三个限制值，不依赖压缩变量名。
- * 幂等：中间值已是 8MB 则跳过。写入前 acorn 校验。
+ * 兼容旧版 5MB/32MB/64MB 连续声明及新版 diff 包装器内联常量。
+ * 新版通过 maxOutputBytes 输入、Math.min 和输出参数的 AST 关联定位，
+ * 同时修改默认值与硬上限，保留调用方更小的限额。写入前 acorn 校验。
  *
  * Usage:
  *   node scripts/patch-diff-limits.js [platform]   # mac-arm64 | mac-x64 | win | 省略=全部
@@ -24,7 +25,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 const FIVE_MB = 5 * 1024 * 1024;
 const OLD_DIFF_LIMIT = 32 * 1024 * 1024;
@@ -80,6 +81,49 @@ function findLimitSequences(ast) {
   return matches;
 }
 
+function propertyName(node) {
+  return node?.type === "Property" ? node.key.name ?? node.key.value : null;
+}
+
+function findInlineLimits(ast, source) {
+  const matches = new Map();
+  walk(ast, (fn) => {
+    if (!["FunctionDeclaration", "FunctionExpression", "ArrowFunctionExpression"].includes(fn.type)) return;
+    if (!source.slice(fn.start, fn.end).includes("--binary")) return;
+    const inputNames = new Set();
+    walk(fn.body, (node) => {
+      if (node.type !== "ObjectPattern") return;
+      const keys = node.properties.map(propertyName);
+      if (!keys.includes("binary") || !keys.includes("configOverrides")) return;
+      const input = node.properties.find((prop) => propertyName(prop) === "maxOutputBytes")?.value;
+      if (input?.type === "Identifier") inputNames.add(input.name);
+    });
+    walk(fn.body, (node) => {
+      if (node.type !== "VariableDeclarator" || node.id.type !== "Identifier") return;
+      const conditional = node.init;
+      if (conditional?.type !== "ConditionalExpression") return;
+      const { test, consequent, alternate } = conditional;
+      if (test.type !== "BinaryExpression" || test.operator !== "==") return;
+      const input = test.left.type === "Literal" && test.left.value === null ? test.right :
+        test.right.type === "Literal" && test.right.value === null ? test.left : null;
+      if (input?.type !== "Identifier" || !inputNames.has(input.name)) return;
+      if (alternate.type !== "CallExpression" || alternate.callee?.type !== "MemberExpression" ||
+        alternate.callee.object?.name !== "Math" || alternate.callee.property?.name !== "min" ||
+        alternate.arguments.length !== 2 || alternate.arguments[0].name !== input.name) return;
+      const nodes = [consequent, alternate.arguments[1]];
+      const values = nodes.map(staticNumber);
+      if (!values.every((value) => [OLD_DIFF_LIMIT, NEW_DIFF_LIMIT].includes(value))) return;
+      let forwarded = false;
+      walk(fn.body, (prop) => {
+        if (propertyName(prop) === "maxOutputBytes" && prop.value?.type === "Identifier" &&
+          prop.value.name === node.id.name) forwarded = true;
+      });
+      if (forwarded) matches.set(node.start, { nodes, values });
+    });
+  });
+  return [...matches.values()];
+}
+
 function patchSource(source) {
   let ast;
   try {
@@ -88,16 +132,21 @@ function patchSource(source) {
     return { status: "parse-failed", error, source };
   }
 
-  const matches = findLimitSequences(ast);
+  const legacy = findLimitSequences(ast).map(({ declaration, value }) => ({
+    nodes: [declaration.init], values: [value],
+  }));
+  const matches = [...legacy, ...findInlineLimits(ast, source)];
   if (matches.length !== 1) {
     return { status: "unexpected-anchor-count", count: matches.length, source };
   }
-  if (matches[0].value === NEW_DIFF_LIMIT) {
+  if (matches[0].values.every((value) => value === NEW_DIFF_LIMIT)) {
     return { status: "already-patched", source };
   }
 
-  const init = matches[0].declaration.init;
-  const next = source.slice(0, init.start) + NEW_DIFF_LIMIT_SOURCE + source.slice(init.end);
+  let next = source;
+  for (const init of [...matches[0].nodes].sort((a, b) => b.start - a.start)) {
+    next = next.slice(0, init.start) + NEW_DIFF_LIMIT_SOURCE + next.slice(init.end);
+  }
   try {
     parseCode(next);
   } catch (error) {
@@ -113,16 +162,12 @@ function main() {
     ["mac-arm64", "mac-x64", "win"].includes(a),
   );
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^worker\.js$/,
+  const bundles = locateBuildTargets({
     platform,
+    label: "Git diff output limit",
+    test: (source) => source.includes("diff-too-large") && source.includes("--no-ext-diff") &&
+      source.includes("maxOutputBytes"),
   });
-
-  if (bundles.length === 0) {
-    console.log("  [skip] worker.js not found");
-    return;
-  }
 
   let patched = 0;
   let failed = 0;

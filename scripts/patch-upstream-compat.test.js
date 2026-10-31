@@ -27,7 +27,6 @@ const {
   patchSource: patchDiffLimits,
 } = require("./patch-diff-limits");
 const {
-  TARGETS,
   hasNativeScopeProtection,
   patchOne: patchSentryFile,
 } = require("./patch-sentry-scope");
@@ -156,9 +155,6 @@ test("diff 上限按数值结构匹配，不依赖压缩变量名", () => {
 });
 
 test("Sentry 补丁覆盖新版主进程 chunk 并保持幂等", () => {
-  assert.equal(TARGETS[1].test("window-all-closed-abc.js"), true);
-  assert.equal(TARGETS[1].test("workspace-root-drop-handler-abc.js"), true);
-
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "codex-sentry-test-"));
   const file = path.join(directory, "window-all-closed-test.js");
   try {

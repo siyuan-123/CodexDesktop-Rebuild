@@ -26,7 +26,7 @@
  */
 const fs = require("fs");
 const acorn = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 const MARKER = "__codex_bc_truncated";
 const NATIVE_MARKER = "codex_truncated_breadcrumb_data";
@@ -44,12 +44,8 @@ const OPTS = "maxBreadcrumbs:20,beforeBreadcrumb:" + TRIM_FN + ",";
 // dsn:<标识符或成员访问>,environment: —— 两处 init 共同的锚点
 const INIT_RE = /dsn:([\w$]+(?:\.[\w$]+)*),environment:/g;
 
-const TARGETS = [
-  /^worker\.js$/,
-  /^(?:workspace-root-drop-handler|window-all-closed)-.*\.js$/,
-];
-
 function hasNativeScopeProtection(code) {
+  if (Array.isArray(code)) code = code.join("\n");
   return (
     code.includes(NATIVE_MARKER) &&
     code.includes("beforeBreadcrumb:") &&
@@ -112,49 +108,41 @@ function main() {
   );
 
   let patched = 0;
-  let found = 0;
-  const nativeBundles = locateBundles({
-    dir: "build",
-    pattern: /^bootstrap(?:-.*)?\.js$/,
+  const allBundles = locateBuildTargets({
     platform,
-  }).filter((bundle) =>
-    hasNativeScopeProtection(fs.readFileSync(bundle.path, "utf-8")),
-  );
-  const nativePlatforms = new Set(nativeBundles.map((bundle) => bundle.platform));
-
-  for (const bundle of nativeBundles) {
+    label: "Sentry scope protection",
+    test: (source) => source.includes(NATIVE_MARKER) || source.includes(MARKER) ||
+      source.includes("scope_v3.json") || /dsn:([\w$]+(?:\.[\w$]+)*),environment:/.test(source),
+  });
+  const nativePlatforms = new Set();
+  for (const currentPlatform of new Set(allBundles.map((bundle) => bundle.platform))) {
+    const platformSource = allBundles
+      .filter((bundle) => bundle.platform === currentPlatform)
+      .map((bundle) => fs.readFileSync(bundle.path, "utf-8"))
+      .join("\n");
+    // 新版将 breadcrumb 过滤器和 scope 文件保护拆到两个 bootstrap chunk。
+    if (hasNativeScopeProtection(platformSource)) nativePlatforms.add(currentPlatform);
+  }
+  for (const currentPlatform of nativePlatforms) {
     console.log(
-      `  [ok] ${relPath(bundle.path)}: upstream truncates breadcrumb data and bounds scope_v3.json`,
+      `  [ok] ${currentPlatform}: upstream truncates breadcrumb data and bounds scope_v3.json across build chunks`,
     );
   }
 
-  const platforms = platform
-    ? [platform]
-    : ["mac-arm64", "mac-x64", "win"].filter(
-        (item) => !nativePlatforms.has(item),
-      );
-  for (const currentPlatform of platforms) {
-    if (nativePlatforms.has(currentPlatform)) continue;
-    for (const pattern of TARGETS) {
-      const bundles = locateBundles({
-        dir: "build",
-        pattern,
-        platform: currentPlatform,
-      });
-      for (const bundle of bundles) {
-        found++;
-        if (patchOne(bundle.path, isCheck)) patched++;
-      }
+  for (const bundle of allBundles) {
+    if (nativePlatforms.has(bundle.platform)) continue;
+    const source = fs.readFileSync(bundle.path, "utf8");
+    if (source.includes(MARKER)) {
+      console.log(`  [ok] ${relPath(bundle.path)}: already patched`);
+    } else if (patchOne(bundle.path, isCheck)) {
+      patched++;
+    } else {
+      throw new Error(`Sentry protection shape changed: ${relPath(bundle.path)}`);
     }
   }
 
-  if (found === 0 && nativeBundles.length === 0) {
-    console.log("  [skip] no target bundles found");
-    return;
-  }
-
   console.log(
-    `  [done] native: ${nativeBundles.length}, patched: ${patched} file(s)`,
+    `  [done] native platforms: ${nativePlatforms.size}, patched: ${patched} file(s)`,
   );
 }
 
@@ -164,7 +152,6 @@ module.exports = {
   INIT_RE,
   MARKER,
   NATIVE_MARKER,
-  TARGETS,
   TRIM_FN,
   hasNativeScopeProtection,
   patchOne,

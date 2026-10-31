@@ -9,9 +9,8 @@
  *   node scripts/patch-copyright.js --check       # Dry-run: report matches
  */
 const fs = require("fs");
-const path = require("path");
 const { parse } = require("acorn");
-const { locateBundles, relPath } = require("./patch-util");
+const { locateBuildTargets, relPath } = require("./patch-util");
 
 // ──────────────────────────────────────────────
 //  Config
@@ -21,6 +20,9 @@ const OLD_COPYRIGHT = "\u00A9 OpenAI"; // (c) OpenAI
 const NEW_COPYRIGHT = "\u00A9 OpenAI \u00B7 Cometix Space"; // (c) OpenAI . Cometix Space
 const OLD_COPYRIGHT_HTML = `<div class="copyright">${OLD_COPYRIGHT}</div>`;
 const NEW_COPYRIGHT_HTML = `<div class="copyright">${NEW_COPYRIGHT}</div>`;
+// 新版 About HTML 由模板源码生成，版权符号以 \xa9 转义形式保存。
+const OLD_COPYRIGHT_HTML_ESCAPED = `<div class="copyright">\\xa9 OpenAI</div>`;
+const NEW_COPYRIGHT_HTML_ESCAPED = `<div class="copyright">\\xa9 OpenAI · Cometix Space</div>`;
 
 // ──────────────────────────────────────────────
 //  AST walker
@@ -99,6 +101,17 @@ function collectPatches(ast, source) {
     offset += OLD_COPYRIGHT_HTML.length;
   }
 
+  offset = 0;
+  while ((offset = source.indexOf(OLD_COPYRIGHT_HTML_ESCAPED, offset)) !== -1) {
+    patches.push({
+      start: offset,
+      end: offset + OLD_COPYRIGHT_HTML_ESCAPED.length,
+      replacement: NEW_COPYRIGHT_HTML_ESCAPED,
+      original: OLD_COPYRIGHT_HTML_ESCAPED,
+    });
+    offset += OLD_COPYRIGHT_HTML_ESCAPED.length;
+  }
+
   return patches;
 }
 
@@ -111,10 +124,13 @@ function main() {
   const isCheck = args.includes("--check");
   const platform = args.find((a) => ["mac-arm64", "mac-x64", "win"].includes(a));
 
-  const bundles = locateBundles({
-    dir: "build",
-    pattern: /^main(-[^.]+)?\.js$/,
+  // About 面板可能拆到任意 chunk，按内容定位并保留旧版兼容。
+  const bundles = locateBuildTargets({
     platform,
+    label: "About copyright",
+    test: (source) => source.includes(OLD_COPYRIGHT_HTML) || source.includes(NEW_COPYRIGHT_HTML) ||
+      source.includes(OLD_COPYRIGHT_HTML_ESCAPED) || source.includes(NEW_COPYRIGHT_HTML_ESCAPED) ||
+      /copyright\s*:\s*["'`]/.test(source),
   });
 
   if (bundles.length === 0) {
@@ -135,10 +151,10 @@ function main() {
 
     if (patches.length === 0) {
       // Check if already patched
-      if (source.includes(NEW_COPYRIGHT)) {
+      if (source.includes(NEW_COPYRIGHT) || source.includes(NEW_COPYRIGHT_HTML_ESCAPED)) {
         console.log("   [ok] Already patched");
       } else {
-        console.log("   [!] No copyright property matched");
+        throw new Error(`No copyright property matched in ${relPath(bundle.path)}`);
       }
       continue;
     }
@@ -158,6 +174,7 @@ function main() {
       code = code.slice(0, p.start) + p.replacement + code.slice(p.end);
     }
 
+    parse(code, { ecmaVersion: "latest", sourceType: "module" });
     fs.writeFileSync(bundle.path, code, "utf-8");
     console.log(`   [ok] Copyright updated: ${patches.length} replacements`);
   }
@@ -170,5 +187,7 @@ module.exports = {
   NEW_COPYRIGHT_HTML,
   OLD_COPYRIGHT,
   OLD_COPYRIGHT_HTML,
+  OLD_COPYRIGHT_HTML_ESCAPED,
   collectPatches,
+  NEW_COPYRIGHT_HTML_ESCAPED,
 };
