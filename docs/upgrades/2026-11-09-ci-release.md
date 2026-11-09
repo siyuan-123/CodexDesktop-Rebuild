@@ -16,3 +16,14 @@
 - Windows 上游 MSIX：`26.1103.4239.0`，x64；内部桌面版本：`26.1103.32239`。
 - `npm test`：159 项通过，0 项失败，包含真实 Windows 浏览器运行时策略测试。
 - 新增回归覆盖嵌套分片、locale 映射选择、JSON 载荷转义与幂等，以及 Rspack 导入调用和服务端能力保留。
+- 正式应用补丁后再次执行检查：27/27 脚本成功，无待修改项。
+- 完整 Windows ZIP：`Codex-win-x64-26.1103.32239.zip`，1,039,196,844 字节（991.1 MiB）；全部 4,431 个文件通过 CRC 和构建目录逐文件 SHA-256 对比。
+- ZIP SHA-256：`0b5c9ce91c974aa1990e198f4fe335e01b421c982b94ebd686220b26967d4c28`。
+- 包内四处浏览器运行时与源码一致，两份调用指引均包含修复；中文语言包已打入 ASAR。启动程序的 ASAR 校验值正确，CLI / code-mode host / command runner 与同版本上游一致；CLI 启动返回 `0.167.0-alpha.3.2`。
+- 本次未启动新的桌面主进程，不把文件验证当作新版界面实测。
+
+## GitHub Actions 状态
+
+修复已推送至 `master`：`a9ee4f2`（浏览器修复）和 `08e9866`（Rspack 构建适配）。GitHub 拒绝启动工作流，返回 `HTTP 422: Actions has been disabled for this repository`，推送也没有产生新的运行记录。
+
+仓库 API 返回 `enabled: true`，两条工作流均为 `active`。重新启用工作流和重新写入仓库 `enabled: true` 后，手动触发仍得到相同拒绝；没有证据确定是账户、账单还是 GitHub 平台限制。本次完整 Windows 包由本机构建并验证，云端自动构建需要 GitHub 侧恢复运行权限。
