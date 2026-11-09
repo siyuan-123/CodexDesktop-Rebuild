@@ -77,6 +77,8 @@ jobs:
           echo "C:\Program Files\7-Zip" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
       - run: node scripts/sync-upstream.js --force --skip-mac
       - run: node scripts/patch-all.js win
+      - name: Verify generated Windows browser runtime
+        run: node --test scripts/repair-browser-runtime.test.js
       - run: npm run build:win-x64
       - uses: actions/upload-artifact@v7
         with:

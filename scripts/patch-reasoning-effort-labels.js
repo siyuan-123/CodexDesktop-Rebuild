@@ -3,7 +3,7 @@
  * 为简体中文推理强度名称补充实际协议参数，并明确 Ultra 的特殊语义。
  *
  * 上游语言包由构建产物生成，文件名包含哈希，直接修改会在下次同步时丢失。
- * 本补丁按稳定的 i18n 消息 ID 定位文本，因此可在每次同步后重复执行。
+ * 本补丁按稳定的 i18n 消息 ID 定位文本，兼容命名模块与 Rspack JSON 语言包。
  *
  * Usage:
  *   node scripts/patch-reasoning-effort-labels.js [platform]
@@ -12,7 +12,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { SRC_DIR, relPath } = require("./patch-util");
+const { SRC_DIR, relPath, listJavaScriptFiles } = require("./patch-util");
 
 const PLATFORMS = ["mac-arm64", "mac-x64", "win"];
 
@@ -74,7 +74,54 @@ function findOccurrences(source, marker) {
   return indexes;
 }
 
+function walk(node, visit) {
+  if (!node?.type) return;
+  visit(node);
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) value.forEach((child) => walk(child, visit));
+    else if (value?.type) walk(value, visit);
+  }
+}
+
+function patchJsonLocale(source) {
+  if (!source.includes("JSON.parse")) return null;
+  const payloads = [];
+  walk(parse(source, { ecmaVersion: "latest", sourceType: "module" }), (node) => {
+    if (node.type !== "CallExpression" || node.callee.object?.name !== "JSON" ||
+        node.callee.property?.name !== "parse" || typeof node.arguments[0]?.value !== "string") return;
+    const literal = node.arguments[0];
+    const messages = JSON.parse(literal.value);
+    if (messages && Object.hasOwn(messages, "composer.mode.local.reasoning.none.label")) {
+      payloads.push({ literal, messages });
+    }
+  });
+  if (payloads.length === 0) return null;
+  if (payloads.length !== 1) return { status: "unexpected-entry-count", source,
+    invalidEntries: [{ messageId: "JSON locale payload", count: payloads.length }] };
+  const [{ literal, messages }] = payloads;
+  const patches = [], invalidEntries = [];
+  for (const { messageIds, translation } of TRANSLATION_SPECS) {
+    const candidates = messageIds.filter((id) => Object.hasOwn(messages, id));
+    if (candidates.length !== 1 || typeof messages[candidates[0]] !== "string") {
+      invalidEntries.push({ messageId: messageIds.join(" or "), count: candidates.length });
+      continue;
+    }
+    const [messageId] = candidates;
+    if (messages[messageId] !== translation) {
+      patches.push({ messageId, original: messages[messageId], replacement: translation });
+      messages[messageId] = translation;
+    }
+  }
+  if (invalidEntries.length) return { status: "unexpected-entry-count", invalidEntries, source };
+  if (!patches.length) return { status: "already-patched", patches, source };
+  const next = source.slice(0, literal.start) + JSON.stringify(JSON.stringify(messages)) + source.slice(literal.end);
+  parse(next, { ecmaVersion: "latest", sourceType: "module" });
+  return { status: "patched", patches, source: next };
+}
+
 function patchSource(source) {
+  const jsonResult = patchJsonLocale(source);
+  if (jsonResult) return jsonResult;
   const patches = [];
   const invalidEntries = [];
 
@@ -132,28 +179,46 @@ function patchSource(source) {
   return { status: "patched", patches, source: nextSource };
 }
 
-function getPlatforms(platform) {
+function getPlatforms(platform, srcDir) {
   if (platform) return [platform];
   return PLATFORMS.filter((item) =>
-    fs.existsSync(path.join(SRC_DIR, item, "_asar", "webview", "assets")),
+    fs.existsSync(path.join(srcDir, item, "_asar", "webview", "assets")),
   );
 }
 
-function findTargets(platform) {
+/** 从真实 locale 导入映射定位中文分片，避免根据翻译文字猜测语言。 */
+function findLocaleBundles(assetsDir) {
+  const files = listJavaScriptFiles(assetsDir);
+  const named = files.filter((file) => /^zh-CN-.*\.js$/.test(path.basename(file)));
+  if (named.length) return named;
+  const chunkIds = new Set();
+  for (const file of files) {
+    const source = fs.readFileSync(path.join(assetsDir, file), "utf8");
+    if (!source.includes("../locales/zh-CN.json")) continue;
+    walk(parse(source, { ecmaVersion: "latest", sourceType: "module" }), (node) => {
+      if (node.type !== "Property" || node.key.value !== "../locales/zh-CN.json") return;
+      walk(node.value, (call) => {
+        if (call.type === "CallExpression" && call.callee.property?.name === "e" &&
+            typeof call.arguments[0]?.value === "number") chunkIds.add(String(call.arguments[0].value));
+      });
+    });
+  }
+  return files.filter((file) => chunkIds.has(path.basename(file).split(".")[0]));
+}
+
+function findTargets(platform, srcDir = SRC_DIR) {
   const targets = [];
   const invalidPlatforms = [];
 
-  for (const currentPlatform of getPlatforms(platform)) {
+  for (const currentPlatform of getPlatforms(platform, srcDir)) {
     const assetsDir = path.join(
-      SRC_DIR,
+      srcDir,
       currentPlatform,
       "_asar",
       "webview",
       "assets",
     );
-    const files = fs
-      .readdirSync(assetsDir)
-      .filter((file) => /^zh-CN-.*\.js$/.test(file));
+    const files = findLocaleBundles(assetsDir);
 
     if (files.length !== 1) {
       invalidPlatforms.push({ platform: currentPlatform, count: files.length });
@@ -236,4 +301,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { TRANSLATIONS, TRANSLATION_SPECS, findTargets, patchSource };
+module.exports = { TRANSLATIONS, TRANSLATION_SPECS, findTargets, findLocaleBundles, patchSource };

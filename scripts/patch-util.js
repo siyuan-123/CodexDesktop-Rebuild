@@ -8,6 +8,21 @@ const path = require("path");
 const SRC_DIR = path.join(__dirname, "..", "src");
 const PROJECT_ROOT = path.join(__dirname, "..");
 
+/** 递归枚举前端 JavaScript，兼容 Rspack 的 assets/async 分片；不跟随符号链接。 */
+function listJavaScriptFiles(directory) {
+  if (!fs.existsSync(directory)) return [];
+  const files = [];
+  function visit(relative) {
+    for (const entry of fs.readdirSync(path.join(directory, relative), { withFileTypes: true })) {
+      const name = path.join(relative, entry.name);
+      if (entry.isDirectory()) visit(name);
+      else if (entry.isFile() && entry.name.endsWith(".js")) files.push(name);
+    }
+  }
+  visit("");
+  return files.sort();
+}
+
 /**
  * Locate bundles matching a filename pattern across platform directories.
  *
@@ -109,4 +124,4 @@ function locateBuildTargets({ platform, test, label, srcDir = SRC_DIR }) {
   return targets;
 }
 
-module.exports = { locateBundles, locateBuildTargets, relPath, SRC_DIR, PROJECT_ROOT };
+module.exports = { locateBundles, locateBuildTargets, listJavaScriptFiles, relPath, SRC_DIR, PROJECT_ROOT };

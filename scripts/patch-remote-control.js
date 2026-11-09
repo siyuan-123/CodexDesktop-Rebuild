@@ -13,7 +13,7 @@
 const fs = require("fs");
 const path = require("path");
 const { parse } = require("acorn");
-const { SRC_DIR, relPath } = require("./patch-util");
+const { listJavaScriptFiles, SRC_DIR, relPath } = require("./patch-util");
 
 const GATES = new Map([
   ["4114442250", "remote_connections_visibility"],
@@ -58,7 +58,12 @@ function findPatches(source) {
 
   walk(ast, (node) => {
     if (node.type !== "CallExpression") return;
-    if (node.callee?.type !== "Identifier") return;
+    // Rspack 跨模块调用会保留 (0, module.export)(gateId) 形式。
+    const callee = node.callee;
+    const importedCall = callee?.type === "SequenceExpression" &&
+      callee.expressions.length === 2 && callee.expressions[0].value === 0 &&
+      callee.expressions[1].type === "MemberExpression";
+    if (callee?.type !== "Identifier" && !importedCall) return;
 
     const gateId = node.arguments
       ?.map((argument) => String(getLiteralValue(argument) ?? ""))
@@ -105,7 +110,7 @@ function main() {
     const assetsDir = path.join(SRC_DIR, targetPlatform, "_asar", "webview", "assets");
     const counts = new Map([...GATES.keys()].map((gateId) => [gateId, { patched: 0, marked: 0 }]));
 
-    for (const name of fs.readdirSync(assetsDir)) {
+    for (const name of listJavaScriptFiles(assetsDir)) {
       if (!name.endsWith(".js")) continue;
       const file = path.join(assetsDir, name);
       const source = fs.readFileSync(file, "utf8");
@@ -160,4 +165,5 @@ function main() {
   );
 }
 
-main();
+if (require.main === module) main();
+module.exports = { findPatches };

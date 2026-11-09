@@ -157,6 +157,9 @@ jobs:
       - name: Patch
         run: node scripts/patch-all.js win
 
+      - name: Verify generated Windows browser runtime
+        run: node --test scripts/repair-browser-runtime.test.js
+
       - name: Build
         run: npm run build:win-x64
 
