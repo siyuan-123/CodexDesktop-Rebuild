@@ -39,6 +39,7 @@ npm run build:all
 - `src/<platform>/_asar` 是 ASAR 内资源的补丁目标。
 - `src/<platform>/plugins` 与 `src/<platform>/cua_node` 是 Browser / Computer Use 等外置运行时的补丁目标；直打包流程会显式覆盖这两个目录，避免重新复制上游安装包缓存时丢失补丁。
 - `patch-browser-auth.js` 兼容 API-key 登录：ChatGPT 身份与 request-header 策略可用时保持原行为；身份读取失败时仅关闭该可选请求头并继续本地浏览器通道，不会把 API key 伪装或发送为 ChatGPT token。
+- `patch-windows-browser-routing.js` 在 Windows 技能及工具入口中区分网页与原生窗口：网页优先使用 Browser Use，避免通过 `sky.get_window_state()` 推断 URL；已终止的浏览器回合仍停止操作。
 - `patch-image-generation-auth.js` 兼容自定义 `base_url` 的 API-key 登录：仅对非 OpenAI/ChatGPT 官方地址为 app-server 注入 provider 认证、`image_gen` 能力参数，并在没有静态模型目录时启用远端模型发现；显式关闭项及已有 `model_catalog_json`/`model_catalog_url` 均优先，API key 只经子进程环境传递，不写入用户配置或命令行。
 - `patch-realtime-voice-auth.js` 为 API-key 登录放行实时语音入口；实时会话仍由 app-server 使用当前 model provider 的 `base_url` 与认证创建，ChatGPT 工作区能力的认证限制保持不变。
 - 上游更新后应先执行 `npm run patch -- --check` 或完整 `npm run patch`，再运行测试和构建。
@@ -65,6 +66,19 @@ npm run build
 ```
 
 检查模式用于判断补丁是否兼容；正式应用后应再次运行检查，确认无待修改项。新版 CLI 与桌面端保持同包，不单独替换 CLI。此次 Windows 升级记录见 [2026-10-21 验证记录](docs/upgrades/2026-10-21.md)，后续修复见 [资源管理器修复记录](docs/upgrades/2026-10-21-explorer-fix.md)；最新菜单修复包与实测范围见 [菜单专项回归记录](docs/upgrades/2026-10-21-menu-audit.md)。
+
+### Windows 浏览器 URL 识别及扩展版本兼容
+
+`could not determine the current browser URL on Windows` 来自原生 Computer Use helper。网页任务应从 `@Chrome` / `@Browser` 的 Browser Use 接口开始；普通 Windows 窗口句柄不是浏览器标签页句柄。已停止的回合需要结束，修复后在下一回合重新开始。
+
+Chrome 扩展 `1.26.1102.11740` 的 `attach` 请求要求 `networkPolicy`。旧桌面运行时 `26.1016.51333` 未传该字段，会出现 `Cannot read properties of undefined (reading 'timeoutMs')`。已生成的 `26.1027.30824` 浏览器运行时包含完整的策略读取与传递链路。可将其同步到现有安装目录，保留桌面端和 CLI：
+
+```powershell
+node scripts/repair-browser-runtime.js --resources 'E:\path\Codex\resources' --codex-home 'C:\Users\me\.codex' --check
+node scripts/repair-browser-runtime.js --resources 'E:\path\Codex\resources' --codex-home 'C:\Users\me\.codex'
+```
+
+脚本使用 `src/win`，也可通过 `--source` 指定已同步的 Windows 资源。客户端、服务端和 WASM 成套更新，检查四个运行时入口，并同步可选 Codex home 下已安装的 browser/chrome 缓存及 Windows 技能。全部文件预检通过后才写入；备份和 SHA-256 清单位于安装目录的 `browser-runtime-backups`，写入失败会回滚。它不修改 URL 策略或浏览器扩展。更新后重启 Codex，或在新回合重建浏览器工具会话。实测范围见 [2026-11-09 浏览器修复记录](docs/upgrades/2026-11-09-browser-fix.md)。
 
 ## Development
 

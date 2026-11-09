@@ -27,6 +27,7 @@ const PATCHES = [
   "patch-thread-file-manager-action.js",
   "patch-thread-copy-markdown.js",
   "patch-browser-auth.js",
+  "patch-windows-browser-routing.js",
   "patch-plugin-auth.js",
   "patch-remote-control.js",
   "patch-composer-workspace-root.js",
