@@ -1,0 +1,34 @@
+--- a/codex-rs/core/src/exec_policy.rs
++++ b/codex-rs/core/src/exec_policy.rs
+@@ -1114,6 +1114,30 @@
+         DangerousCommandMatch::ForcedRm => {
+             "rm -f style commands are not permitted. Use a safer approach"
+         }
+-        DangerousCommandMatch::Other => "blocked by policy",
++        // 保留拒绝决定，说明本地命令检查与禁用审批提示之间的冲突。
++        DangerousCommandMatch::Other => {
++            "blocked by policy: command safety checks require approval, but approval_policy=never disables approval prompts"
++        }
++    }
++}
++
++#[cfg(test)]
++mod rejection_diagnostics_tests {
++    use super::{DangerousCommandMatch, dangerous_command_rejection_reason};
++
++    #[test]
++    fn heuristic_rejection_explains_disabled_approval_prompts() {
++        assert_eq!(
++            dangerous_command_rejection_reason(DangerousCommandMatch::Other),
++            "blocked by policy: command safety checks require approval, but approval_policy=never disables approval prompts"
++        );
++    }
++
++    #[test]
++    fn forced_delete_retains_specific_rejection() {
++        assert_eq!(
++            dangerous_command_rejection_reason(DangerousCommandMatch::ForcedRm),
++            "rm -f style commands are not permitted. Use a safer approach"
++        );
+     }
+ }

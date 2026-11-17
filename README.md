@@ -67,6 +67,8 @@ npm run build
 
 检查模式用于判断补丁是否兼容；正式应用后应再次运行检查，确认无待修改项。新版 CLI 与桌面端保持同包，不单独替换 CLI。此次 Windows 升级记录见 [2026-10-21 验证记录](docs/upgrades/2026-10-21.md)，后续修复见 [资源管理器修复记录](docs/upgrades/2026-10-21-explorer-fix.md)；最新菜单修复包与实测范围见 [菜单专项回归记录](docs/upgrades/2026-10-21-menu-audit.md)。
 
+Windows 打包在清理输出目录前核对补丁源与 MSIX 缓存的桌面版本、构建号及配套二进制 SHA-256，避免两次同步留下的新旧资源混用。`approval_policy = "never"` 表示不请求审批；命令分类器仍可能拒绝执行。相关源码链路、已复现的 PowerShell URL 误关联及新版对照见 [2026-11-17 命令策略诊断](docs/diagnostics/2026-11-17-command-policy.md)，最新验证包的版本、产物与迁移范围见 [Windows 配套运行时验证](docs/diagnostics/2026-11-17-windows-runtime.md)。
+
 ### Windows 浏览器 URL 识别及扩展版本兼容
 
 `could not determine the current browser URL on Windows` 来自原生 Computer Use helper。网页任务应从 `@Chrome` / `@Browser` 的 Browser Use 接口开始；普通 Windows 窗口句柄不是浏览器标签页句柄。已停止的回合需要结束，修复后在下一回合重新开始。

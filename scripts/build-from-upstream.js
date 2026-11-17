@@ -18,6 +18,7 @@ const { execSync, execFileSync } = require("child_process");
 const { getCodexBinarySource } = require("./codex-binary-policy");
 const { resolveUpstreamCodex } = require("./codex-resources");
 const { validateWindowsPackage } = require("./sync-upstream");
+const { assertMatchingWindowsRuntime } = require("./windows-runtime-compatibility");
 
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const SRC_DIR = path.join(PROJECT_ROOT, "src");
@@ -320,6 +321,9 @@ function buildWin(platform) {
   }
 
   // Copy app/ to output
+  // 在清理输出前校验整套版本，缓存被另一次同步覆盖时明确失败。
+  const runtime = assertMatchingWindowsRuntime(platformDir, appDir);
+  console.log(`   [verify] paired desktop ${runtime.version} (${runtime.build}), ${runtime.binaries.length} runtime binaries`);
   const outAppDir = path.join(OUT_DIR, "win");
   clearDir(outAppDir);
   const outApp = path.join(outAppDir, "Codex-win32-x64");
